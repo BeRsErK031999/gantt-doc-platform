@@ -1,0 +1,136 @@
+import type {
+  DocumentDerivationKind,
+  DocumentKind,
+  DocumentStatus,
+  DocumentOperation,
+  SourceArtifact
+} from "./documents-api"
+
+const formatCount = (value: number, unitLabel: string): string => {
+  return `${value.toLocaleString("en-US")} ${unitLabel}`
+}
+
+export const formatCreatedAt = (value: string): string => {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(date)
+}
+
+export const formatDocumentKind = (value: DocumentKind): string => {
+  return value.toUpperCase()
+}
+
+export const formatDocumentStatus = (value: DocumentStatus): string => {
+  switch (value) {
+    case "draft":
+      return "Draft"
+    case "ready":
+      return "Ready"
+  }
+}
+
+export const formatSourceArtifactStorageKind = (
+  value: SourceArtifact["storageKind"]
+): string => {
+  switch (value) {
+    case "local-placeholder":
+      return "Local placeholder"
+  }
+}
+
+export const formatSourceArtifactStatus = (
+  value: SourceArtifact["status"]
+): string => {
+  switch (value) {
+    case "registered":
+      return "Registered"
+  }
+}
+
+export const formatOperationKind = (value: DocumentOperation["kind"]): string => {
+  switch (value) {
+    case "convert-to-pdf":
+      return "Convert to PDF"
+    case "extract-metadata":
+      return "Extract metadata"
+    case "generate-derived-document":
+      return "Generate derived document"
+    case "compress-pdf":
+      return "Compress PDF"
+    case "split-pdf":
+      return "Split PDF"
+  }
+}
+
+export const formatOperationBoundary = (
+  value: DocumentOperation["kind"]
+): string => {
+  switch (value) {
+    case "compress-pdf":
+    case "split-pdf":
+      return "PDF engine"
+    case "convert-to-pdf":
+    case "extract-metadata":
+    case "generate-derived-document":
+      return "Document platform"
+  }
+}
+
+export const formatOperationStatus = (
+  value: DocumentOperation["status"]
+): string => {
+  switch (value) {
+    case "planned":
+      return "Planned"
+    case "completed":
+      return "Completed"
+  }
+}
+
+export const formatDerivationKind = (value: DocumentDerivationKind): string => {
+  switch (value) {
+    case "converted-pdf":
+      return "Converted PDF"
+    case "document-summary":
+      return "Document summary"
+    case "compressed-pdf":
+      return "Compressed PDF placeholder"
+    case "split-pdf-set":
+      return "Split PDF placeholder"
+  }
+}
+
+export const formatSizeBytes = (value: number): string => {
+  if (value < 1024) {
+    return formatCount(value, "bytes")
+  }
+
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`
+  }
+
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`
+}
+
+export const formatPageCount = (value: number | null): string => {
+  if (value === null) {
+    return "Not available"
+  }
+
+  return formatCount(value, value === 1 ? "page" : "pages")
+}
+
+export const formatWordCount = (value: number | null): string => {
+  if (value === null) {
+    return "Not available"
+  }
+
+  return formatCount(value, value === 1 ? "word" : "words")
+}

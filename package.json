@@ -1,0 +1,22 @@
+{
+  "name": "gantt-doc-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Foundation layer for the gantt-doc-platform document platform.",
+  "packageManager": "yarn@4.9.2",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "lint": "eslint .",
+    "type-check": "yarn workspace @gantt-doc/api type-check && yarn workspace @gantt-doc/web type-check"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.2.1",
+    "globals": "^17.5.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.0"
+  }
+}
