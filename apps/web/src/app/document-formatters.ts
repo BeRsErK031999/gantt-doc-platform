@@ -70,6 +70,8 @@ export const formatOperationKind = (value: DocumentOperation["kind"]): string =>
       return "Compress PDF"
     case "split-pdf":
       return "Split PDF"
+    case "merge-pdf":
+      return "Merge PDF"
   }
 }
 
@@ -79,6 +81,7 @@ export const formatOperationBoundary = (
   switch (value) {
     case "compress-pdf":
     case "split-pdf":
+    case "merge-pdf":
       return "PDF engine"
   }
 }
@@ -112,6 +115,8 @@ export const formatDerivationKind = (value: DocumentDerivationKind): string => {
       return "Compressed PDF"
     case "split-pdf":
       return "Split PDF"
+    case "merge-pdf":
+      return "Merged PDF"
   }
 }
 

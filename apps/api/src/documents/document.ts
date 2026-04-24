@@ -21,7 +21,10 @@ export type PlatformDocumentActionKind =
   | "extract-metadata"
   | "generate-derived-document"
 
-export type PdfEngineActionKind = "compress-pdf" | "split-pdf"
+export type PdfEngineActionKind =
+  | "compress-pdf"
+  | "split-pdf"
+  | "merge-pdf"
 
 export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKind
 
@@ -52,6 +55,7 @@ export type DocumentDerivationKind =
   | "document-summary"
   | "compressed-pdf"
   | "split-pdf"
+  | "merge-pdf"
 
 export type DocumentOrigin = {
   documentId: string
@@ -101,6 +105,15 @@ export type CreateDocumentInput = {
   kind: DocumentKind
 }
 
+export type MergePdfPageNumberingMode = "none" | "append"
+
+export type MergePdfActionInput = {
+  kind: "merge-pdf"
+  sourceDocumentIds: string[]
+  excludePageRanges?: string
+  pageNumberingMode?: MergePdfPageNumberingMode
+}
+
 export type UploadedDocumentSource = {
   fileName: string
   kind: DocumentKind
@@ -122,7 +135,11 @@ export const isPlatformDocumentActionKind = (
 export const isPdfEngineActionKind = (
   value: unknown
 ): value is PdfEngineActionKind => {
-  return value === "compress-pdf" || value === "split-pdf"
+  return (
+    value === "compress-pdf" ||
+    value === "split-pdf" ||
+    value === "merge-pdf"
+  )
 }
 
 export const isDocumentActionKind = (
@@ -138,6 +155,7 @@ export const isPdfEngineActionSupportedForDocument = (
   switch (actionKind) {
     case "compress-pdf":
     case "split-pdf":
+    case "merge-pdf":
       return documentKind === "pdf"
   }
 }
@@ -269,6 +287,7 @@ export const resolveDocumentKindForDerivation = (
     case "converted-pdf":
     case "compressed-pdf":
     case "split-pdf":
+    case "merge-pdf":
       return "pdf"
     case "document-summary":
       return "docx"

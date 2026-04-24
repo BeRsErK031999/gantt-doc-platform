@@ -2,27 +2,41 @@
 
 ## Purpose
 
-This document records the first real integration step between `gantt-doc-platform` and `gantt-pdf-platform`.
+This document records the current real integration between `gantt-doc-platform` and `gantt-pdf-platform`.
 
-`gantt-doc-platform` acts as the document layer. It owns document records, source artifacts, derived documents, local storage paths, and the API/UI flow visible to the user.
+`gantt-doc-platform` remains the orchestration layer. It owns:
 
-`gantt-pdf-platform` acts as the PDF execution engine. It receives PDF-specific requests, executes PDF processing, and returns result artifacts back to the document layer.
+- document records;
+- uploaded source artifacts;
+- derived documents;
+- operation history;
+- local storage paths;
+- API and UI behavior visible to the user.
+
+`gantt-pdf-platform` remains the execution engine. It owns:
+
+- PDF operation contract validation;
+- authenticated PDF execution;
+- downloadable operation results.
+
+`gantt-doc-platform` must not implement local PDF merge logic.
 
 ## Supported Operations
 
-The current integration supports two PDF engine operations:
+The current integration supports three real PDF engine actions:
 
 - `compress-pdf`
 - `split-pdf`
-
-No other PDF engine action should be treated as currently supported by `gantt-doc-platform`.
+- `merge-pdf`
 
 Operational constraints for the current milestone:
 
-- `split-pdf` requires a non-empty `pageRanges` value before the request can be sent to `gantt-pdf-platform`;
-- `compress-pdf` does not accept or require `pageRanges`;
-- `zip` is a derived document result kind, not a creatable source document kind for `POST /documents`;
-- `zip` cannot be used as the source document kind for `compress-pdf` or `split-pdf`.
+- `compress-pdf` accepts one uploaded PDF source;
+- `split-pdf` accepts one uploaded PDF source plus required `pageRanges`;
+- `merge-pdf` accepts one root uploaded PDF plus at least one additional uploaded PDF source;
+- DOCX and ZIP cannot be used as merge sources;
+- merge result must stay a PDF artifact;
+- split result may still be PDF or ZIP depending on the engine response.
 
 ## Environment Configuration
 
@@ -31,11 +45,9 @@ The API integration depends on two environment variables:
 - `PDF_ENGINE_BASE_URL`
 - `PDF_ENGINE_AUTH_TOKEN`
 
-For local happy-path runtime validation, `gantt-pdf-platform` must also run with `PDF_OPERATION_EXECUTION_MODE=real`; `simulate` mode does not guarantee a downloadable result artifact for `compress` or `split`.
-
 `PDF_ENGINE_BASE_URL` must point to the reachable base URL of `gantt-pdf-platform`.
 
-`PDF_ENGINE_AUTH_TOKEN` is used as a bearer token for authenticated requests to the PDF engine.
+`PDF_ENGINE_AUTH_TOKEN` is used as a bearer token for every authenticated engine request.
 
 Operational rules:
 
@@ -43,50 +55,96 @@ Operational rules:
 - do not commit the token to git;
 - keep the token in local environment configuration only.
 
-## Actual Flow
+For local happy-path runtime validation, `gantt-pdf-platform` must run with `PDF_OPERATION_EXECUTION_MODE=real`.
 
-The current shared engine flow is:
+## Actual Engine Contract
 
-1. Create a document in `gantt-pdf-platform`.
-2. Upload the input source PDF file to that PDF engine document.
-3. Create an engine operation:
-   - `compress` for `compress-pdf`
-   - `split` with `pageRanges` for `split-pdf`
-4. Execute the operation.
-5. Download the result artifact.
-6. Save the downloaded result into `gantt-doc-platform` local storage.
-7. Create a derived document record in `gantt-doc-platform`.
+The current doc-platform integration uses these `gantt-pdf-platform` endpoints:
 
-From the document-platform point of view, the PDF engine is an external execution boundary. The document platform remains responsible for document metadata, storage references, and derived-document registration.
+- `POST /api/v1/documents`
+- `POST /api/v1/documents/:documentId/upload-input-file`
+- `POST /api/v1/documents/:documentId/operations`
+- `POST /api/v1/documents/:documentId/operations/:jobId/execute`
+- `GET /api/v1/documents/:documentId/operations/:jobId/result`
 
-For `split-pdf`, the engine contract is:
+Every `/api/v1/*` request requires:
+
+- `Authorization: Bearer <token>`
+
+The create-document request must include:
 
 ```json
 {
-  "operationType": "split",
-  "pageRanges": "1-3,5"
+  "name": "Document name",
+  "source": "manual-upload"
 }
 ```
 
-The split result is not fixed to one artifact type. The engine may return:
+The current operation payloads are:
 
-- `application/pdf`
-- `application/zip`
-- `application/octet-stream`
+```json
+{ "operationType": "compress" }
+```
 
-The document platform preserves the returned file name and media type when saving the derived artifact locally.
+```json
+{ "operationType": "split", "pageRanges": "1-3,5" }
+```
+
+```json
+{
+  "operationType": "merge",
+  "sourceDocumentIds": ["additional-engine-document-id"],
+  "excludePageRanges": "1",
+  "pageNumberingMode": "none"
+}
+```
+
+Important merge contract detail:
+
+- the current engine document is always the implicit first merge source;
+- `sourceDocumentIds` must contain only additional engine document ids in the requested order;
+- `pageNumberingMode` supports `none` and `append`;
+- `excludePageRanges` is optional.
+
+## Actual Flow
+
+### Compress and split
+
+1. Create a document in `gantt-pdf-platform`.
+2. Upload the root PDF file to that engine document.
+3. Create the engine operation.
+4. Execute the operation.
+5. Download the result artifact.
+6. Save the result under local `storage/`.
+7. Create a derived document in `gantt-doc-platform`.
+
+### Merge
+
+1. Validate the root document exists, is a PDF, and has an uploaded local source file.
+2. Validate every additional `sourceDocumentId` exists, is a PDF, and has an uploaded local source file.
+3. Create a primary engine document for the root source.
+4. Upload the root source PDF to the primary engine document.
+5. Create one additional engine document per extra merge source.
+6. Upload each additional source PDF to its own engine document.
+7. Create one merge operation on the primary engine document with ordered additional engine document ids.
+8. Execute the merge operation.
+9. Download the merge result from the primary engine document job result endpoint.
+10. Save the merged PDF locally.
+11. Register a derived document with `origin.derivationKind = "merge-pdf"`.
+12. Add operation history on the root document.
 
 ## Local Storage Paths
 
-`gantt-doc-platform` stores runtime files under local ignored storage paths:
+`gantt-doc-platform` stores runtime files under ignored local storage paths:
 
 - source upload: `storage/documents/<documentId>/original.pdf`
-- compressed result: `storage/documents/<sourceDocumentId>/derived/<derivedDocumentId>/<engineFileName>`
-- split result: `storage/documents/<sourceDocumentId>/derived/<derivedDocumentId>/<engineFileName>`
+- compressed result: `storage/documents/<rootDocumentId>/derived/<derivedDocumentId>/<engineFileName>`
+- split result: `storage/documents/<rootDocumentId>/derived/<derivedDocumentId>/<engineFileName>`
+- merge result: `storage/documents/<rootDocumentId>/derived/<derivedDocumentId>/<engineFileName>`
 
-The stored derived file name is the downloaded engine file name when available from `content-disposition`, otherwise a local fallback name is used.
+If the engine does not provide a merge filename, doc-platform falls back to `merged.pdf`.
 
-The stored derived media type is preserved in document metadata and reused later by the download endpoint.
+The stored derived media type and file name are preserved and reused by the download endpoint.
 
 ## Download Behavior
 
@@ -99,170 +157,95 @@ Current behavior:
 - the API reads the saved local artifact referenced by the derived document;
 - `Content-Disposition` uses the stored file name;
 - `Content-Type` uses the stored media type;
-- split results may download as PDF or ZIP depending on the engine output;
-- the API must not recompute file name or media type during download when the stored values are already present.
+- merge downloads reuse the stored merge filename and media type instead of hardcoding PDF headers globally;
+- split results may still download as PDF or ZIP depending on the stored engine output.
 
 ## Error Response Shape
 
-`compress-pdf` failures are returned as structured API errors.
-
-Current response shape:
+Engine-backed failures use the same structured contract:
 
 - `code`: stable machine-readable error code;
 - `message`: user-facing error message;
-- `details`: optional diagnostic details for developers and local troubleshooting.
+- `details`: optional diagnostic details.
 
-Example shape:
+Example:
 
 ```json
 {
-  "code": "PDF_ENGINE_UNAVAILABLE",
-  "message": "PDF engine is unavailable or unreachable.",
-  "details": "fetch failed"
+  "code": "PDF_ENGINE_MERGE_FAILED",
+  "message": "PDF engine merge execution failed.",
+  "details": "HTTP 400. Field 'sourceDocumentIds' must contain at least one additional document id for merge operations."
 }
 ```
 
-The backend must not return raw stack traces to the user in this contract.
+The backend must not return raw stack traces or secrets in this contract.
 
-The current milestone relies on this contract in three places:
+## Runtime Checks
 
-- immediate API responses from `POST /documents/:id/actions`;
-- operation history entries stored on the source document;
-- local troubleshooting through runbooks and browser error UX.
+Current runtime checks for `merge-pdf`:
 
-## User-Facing Messages And Technical Diagnostics
+- require at least two uploaded PDFs in Toolbox before merge can run;
+- reject non-PDF merge sources;
+- reject sources without uploaded local files;
+- reject missing local storage files before calling the engine;
+- reject wrong engine token through `PDF_ENGINE_AUTH_INVALID`;
+- reject engine downtime through `PDF_ENGINE_UNAVAILABLE`;
+- reject invalid merge result artifacts through `PDF_ENGINE_MERGE_RESULT_INVALID`.
 
-The error contract separates safe user messaging from implementation diagnostics.
+## Stable Error Codes
 
-- `message` is safe to show in UI near the action block;
-- `details` is diagnostic only and may contain HTTP status context, storage paths, or downstream error text;
-- `code` is the stable programmatic identifier for UI logic, debugging, and runbook references.
-
-Operational rules:
-
-- never log the bearer token value;
-- never return the bearer token in API responses;
-- do not place secrets into `details`;
-- prefer explicit diagnostics instead of generic `"Something went wrong"` messages.
-
-## PDF Engine Error Codes
-
-The current engine-backed flows can return the following stable error codes.
-
-### Local document and source validation
+Local document and source validation:
 
 - `SOURCE_FILE_NOT_UPLOADED`
-  returned when `compress-pdf` is triggered before a local PDF source file was uploaded.
 - `SOURCE_FILE_MISSING`
-  returned when the source artifact is marked as uploaded but the local file is no longer present on disk.
 - `PDF_ACTION_UNSUPPORTED_DOCUMENT_KIND`
-  returned when a PDF engine action is requested for a non-PDF document.
+- `MERGE_SOURCE_DOCUMENTS_REQUIRED`
+- `MERGE_SOURCE_DOCUMENT_NOT_FOUND`
+- `MERGE_SOURCE_DOCUMENT_UNSUPPORTED_KIND`
+- `MERGE_SOURCE_FILE_NOT_UPLOADED`
+- `MERGE_SOURCE_FILE_MISSING`
 
-### Server configuration
+Server configuration:
 
 - `PDF_ENGINE_BASE_URL_MISSING`
-  returned when `PDF_ENGINE_BASE_URL` is not configured in `gantt-doc-platform`.
 - `PDF_ENGINE_AUTH_TOKEN_MISSING`
-  returned when `PDF_ENGINE_AUTH_TOKEN` is not configured in `gantt-doc-platform`.
 
-### External PDF engine access
+External PDF engine access:
 
 - `PDF_ENGINE_AUTH_INVALID`
-  returned when the configured bearer token is rejected by `gantt-pdf-platform`.
 - `PDF_ENGINE_UNAVAILABLE`
-  returned when the PDF engine cannot be reached at all.
 - `PDF_ENGINE_DOCUMENT_CREATE_FAILED`
-  returned when engine-side document creation returns a failing HTTP response.
 - `PDF_ENGINE_SOURCE_UPLOAD_FAILED`
-  returned when uploading the source PDF to the engine fails.
 - `PDF_ENGINE_JOB_CREATE_FAILED`
-  returned when engine-side `compress` job creation fails.
 - `PDF_ENGINE_EXECUTION_FAILED`
-  returned when engine execution returns a failing HTTP response before a completed result is produced.
 - `PDF_ENGINE_EXECUTION_UNEXPECTED_STATUS`
-  returned when the engine responds but does not finish the operation in the expected completed state.
 - `PDF_ENGINE_RESULT_DOWNLOAD_FAILED`
-  returned when the engine-side result artifact cannot be downloaded after processing.
 - `PDF_ENGINE_SPLIT_FAILED`
-  returned when engine-side `split` setup or execution fails.
 - `PDF_ENGINE_SPLIT_RESULT_INVALID`
-  returned when the engine-side split result is empty or has an unsupported artifact shape.
+- `PDF_ENGINE_MERGE_FAILED`
+- `PDF_ENGINE_MERGE_RESULT_INVALID`
 
-### Local persistence after engine success
+Local persistence after engine success:
 
 - `LOCAL_DERIVED_FILE_SAVE_FAILED`
-  returned when the compressed artifact was received from the engine but saving it to local storage failed.
-
-## Local Storage Paths
-
-The current implementation stores local runtime artifacts under ignored project storage.
-
-Stored artifact categories:
-
-- source uploads: local files uploaded for a document before an engine action is executed;
-- compressed derived result: the downloaded compressed PDF saved after the PDF engine returns the result;
-- split derived result: the downloaded PDF or ZIP saved after the PDF engine returns the split result.
-
-These files are runtime artifacts, not source code assets.
 
 ## Current Limitations
 
-The current integration intentionally stays narrow.
+The current integration intentionally stays narrow:
 
-- no OCR;
-- no polling workflow;
-- no jobs framework;
-- no Docker networking setup between repositories;
-- no shared package between `gantt-doc-platform` and `gantt-pdf-platform`.
-
-This is a direct repository-to-repository HTTP integration with local storage persistence on the document-platform side.
+- no queue or polling workflow;
+- no drag-and-drop upload UI;
+- no page thumbnail UI;
+- no client-side PDF merge implementation;
+- no shared SDK between repositories;
+- no new engine actions beyond `compress-pdf`, `split-pdf`, and `merge-pdf`.
 
 ## Git Hygiene
 
-The integration produces runtime data that must stay out of tracked changes.
+The integration produces runtime data that must stay out of tracked changes:
 
-- `data/` is ignored;
-- `storage/` is ignored;
-- runtime-generated files must not be committed.
-
-This keeps the repository focused on source code and documentation rather than local execution artifacts.
-
-## Troubleshooting
-
-### Missing base URL
-
-If `PDF_ENGINE_BASE_URL` is not configured, `compress-pdf` cannot call the PDF engine and the action will fail before any external request is made.
-
-### Missing token
-
-If `PDF_ENGINE_AUTH_TOKEN` is not configured, authenticated PDF engine requests cannot be sent and the action will fail before the external workflow starts.
-
-### Wrong token
-
-If the token is invalid, the PDF engine can reject the request with an authorization error. The token value itself must still never be logged.
-
-### Source file not uploaded
-
-`compress-pdf` and `split-pdf` require an uploaded local PDF source file. If the source artifact is still only registered as a placeholder, the action must fail.
-
-### PDF engine unavailable
-
-If `gantt-pdf-platform` is down, unreachable, or otherwise unavailable, the gateway request will fail and `compress-pdf` cannot complete.
-
-### Result download failed
-
-If the PDF engine finishes processing but the result artifact cannot be downloaded, the document platform must report that failure instead of pretending the operation succeeded.
-
-### Split page ranges missing or invalid
-
-If `split-pdf` is called without a non-empty `pageRanges` value, `gantt-doc-platform` must reject the request before it reaches the PDF engine.
-
-If `pageRanges` is syntactically acceptable for the route but rejected by `gantt-pdf-platform`, the API should surface that failure through the stable PDF engine error contract rather than masking it with a generic server error.
-
-### Invalid split result
-
-If the split endpoint returns an empty body or an unsupported artifact shape, the document platform must fail with `PDF_ENGINE_SPLIT_RESULT_INVALID` instead of registering a fake derived document.
-
-### Local save failed
-
-If the PDF engine returns a valid compressed PDF but `gantt-doc-platform` cannot persist it under local `storage/`, the flow must fail with `LOCAL_DERIVED_FILE_SAVE_FAILED` and must not register a fake successful derived document.
+- `data/`
+- `storage/`
+- `dist/`
+- `node_modules/`
+- `.yarn/`

@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
 
 import type {
   CreateDocumentInput,
-  DocumentActionKind
+  DocumentActionKind,
+  MergePdfPageNumberingMode
 } from "../documents/document.js"
 import {
   isDocumentActionKind
@@ -15,6 +16,8 @@ const INVALID_DOCUMENT_ACTION_PAYLOAD_MESSAGE =
   "Document action payload must include a supported action kind."
 const INVALID_SPLIT_PAGE_RANGES_MESSAGE =
   "Split PDF action payload must include a non-empty pageRanges string using values such as \"1\", \"1-2\", or \"1-3,5\"."
+const INVALID_MERGE_ACTION_PAYLOAD_MESSAGE =
+  "Merge PDF action payload must include additional sourceDocumentIds excluding the current document and may optionally include excludePageRanges and pageNumberingMode."
 const INVALID_DOCUMENT_UPLOAD_PAYLOAD_MESSAGE =
   "Document upload must include one file field named file."
 const DOCUMENT_NOT_FOUND_MESSAGE = "Document was not found."
@@ -30,11 +33,17 @@ type ErrorResponseBody = {
 
 type ParsedDocumentActionInput =
   | {
-      kind: Exclude<DocumentActionKind, "split-pdf">
+      kind: Exclude<DocumentActionKind, "split-pdf" | "merge-pdf">
     }
   | {
       kind: "split-pdf"
       pageRanges: string
+    }
+  | {
+      kind: "merge-pdf"
+      sourceDocumentIds: string[]
+      excludePageRanges?: string
+      pageNumberingMode?: MergePdfPageNumberingMode
     }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
@@ -72,8 +81,37 @@ const isValidSplitPageRanges = (value: string): boolean => {
   return /^[\d,\-\s]+$/.test(value)
 }
 
-const parseDocumentActionInput = (
+const isMergePdfPageNumberingMode = (
   value: unknown
+): value is MergePdfPageNumberingMode => {
+  return value === "none" || value === "append"
+}
+
+const normalizeOptionalPageRanges = (value: unknown): string | null | undefined => {
+  if (value === undefined) {
+    return undefined
+  }
+
+  if (typeof value !== "string") {
+    return null
+  }
+
+  const normalizedValue = value.trim()
+
+  if (normalizedValue.length === 0) {
+    return undefined
+  }
+
+  if (!isValidSplitPageRanges(normalizedValue)) {
+    return null
+  }
+
+  return normalizedValue
+}
+
+const parseDocumentActionInput = (
+  value: unknown,
+  currentDocumentId: string
 ): ParsedDocumentActionInput | null => {
   if (!isRecord(value)) {
     return null
@@ -86,8 +124,61 @@ const parseDocumentActionInput = (
   }
 
   if (kind !== "split-pdf") {
+    if (kind !== "merge-pdf") {
+      return {
+        kind
+      }
+    }
+
+    const { excludePageRanges, pageNumberingMode, sourceDocumentIds } = value
+
+    if (
+      !Array.isArray(sourceDocumentIds)
+    ) {
+      return null
+    }
+
+    const normalizedSourceDocumentIds: string[] = []
+    const seenSourceDocumentIds = new Set<string>()
+
+    for (const sourceDocumentId of sourceDocumentIds) {
+      if (typeof sourceDocumentId !== "string") {
+        return null
+      }
+
+      const normalizedSourceDocumentId = sourceDocumentId.trim()
+
+      if (
+        normalizedSourceDocumentId.length === 0 ||
+        normalizedSourceDocumentId === currentDocumentId ||
+        seenSourceDocumentIds.has(normalizedSourceDocumentId)
+      ) {
+        return null
+      }
+
+      seenSourceDocumentIds.add(normalizedSourceDocumentId)
+      normalizedSourceDocumentIds.push(normalizedSourceDocumentId)
+    }
+
+    const normalizedExcludePageRanges =
+      normalizeOptionalPageRanges(excludePageRanges)
+
+    if (normalizedExcludePageRanges === null) {
+      return null
+    }
+
+    if (
+      pageNumberingMode !== undefined &&
+      !isMergePdfPageNumberingMode(pageNumberingMode)
+    ) {
+      return null
+    }
+
     return {
-      kind
+      kind,
+      sourceDocumentIds: normalizedSourceDocumentIds,
+      excludePageRanges: normalizedExcludePageRanges,
+      pageNumberingMode
     }
   }
 
@@ -294,22 +385,35 @@ export const registerDocumentsRoute = (
       request: FastifyRequest<{ Params: { id: string }; Body: unknown }>,
       reply: FastifyReply
     ) => {
-      const actionInput = parseDocumentActionInput(request.body)
+      const actionInput = parseDocumentActionInput(
+        request.body,
+        request.params.id
+      )
 
       if (actionInput === null) {
         reply.code(400)
 
-        if (
-          isRecord(request.body) &&
-          request.body.kind === "split-pdf"
-        ) {
+      if (
+        isRecord(request.body) &&
+        request.body.kind === "split-pdf"
+      ) {
           return {
             code: "INVALID_DOCUMENT_ACTION_PAYLOAD",
-            message: INVALID_SPLIT_PAGE_RANGES_MESSAGE
-          }
+          message: INVALID_SPLIT_PAGE_RANGES_MESSAGE
         }
+      }
 
+      if (
+        isRecord(request.body) &&
+        request.body.kind === "merge-pdf"
+      ) {
         return {
+          code: "INVALID_DOCUMENT_ACTION_PAYLOAD",
+          message: INVALID_MERGE_ACTION_PAYLOAD_MESSAGE
+        }
+      }
+
+      return {
           code: "INVALID_DOCUMENT_ACTION_PAYLOAD",
           message: INVALID_DOCUMENT_ACTION_PAYLOAD_MESSAGE
         }

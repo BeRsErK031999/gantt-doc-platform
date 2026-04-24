@@ -5,6 +5,7 @@ import type {
   DocumentDetails,
   DocumentActionKind,
   PlatformDocumentActionKind,
+  PdfEngineActionKind,
   RunDocumentActionRequest
 } from "./documents-api"
 
@@ -21,10 +22,15 @@ type ActionState =
 
 type ActionDefinition = {
   description: string
-  kind: DocumentActionKind
+  kind: Exclude<DocumentActionKind, "merge-pdf">
   label: string
   successMessage: string
 }
+
+type SupportedDetailsPdfEngineActionKind = Exclude<
+  PdfEngineActionKind,
+  "merge-pdf"
+>
 
 type SplitFormState = {
   pageRanges: string
@@ -47,7 +53,9 @@ const PLATFORM_ACTIONS: Array<
   }
 ]
 
-const PDF_ENGINE_ACTIONS: ActionDefinition[] = [
+const PDF_ENGINE_ACTIONS: Array<
+  ActionDefinition & { kind: SupportedDetailsPdfEngineActionKind }
+> = [
   {
     kind: "compress-pdf",
     label: "Compress PDF",

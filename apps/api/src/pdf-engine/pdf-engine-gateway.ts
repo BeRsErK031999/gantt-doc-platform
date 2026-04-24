@@ -1,15 +1,33 @@
 import { readFile } from "node:fs/promises"
 
-import type { PdfEngineActionKind } from "../documents/document.js"
+import type {
+  MergePdfPageNumberingMode,
+  PdfEngineActionKind
+} from "../documents/document.js"
 
-export type SubmitPdfActionInput = {
-  actionKind: PdfEngineActionKind
-  documentId: string
-  documentName: string
-  pageRanges?: string
-  sourceFileName: string
-  sourceFilePath: string
-}
+export type SubmitPdfActionInput =
+  | {
+      actionKind: Exclude<PdfEngineActionKind, "merge-pdf">
+      documentId: string
+      documentName: string
+      pageRanges?: string
+      sourceFileName: string
+      sourceFilePath: string
+    }
+  | {
+      actionKind: "merge-pdf"
+      documentId: string
+      documentName: string
+      sourceDocumentIds: string[]
+      excludePageRanges?: string
+      pageNumberingMode: MergePdfPageNumberingMode
+      sourceDocuments: Array<{
+        documentId: string
+        documentName: string
+        sourceFileName: string
+        sourceFilePath: string
+      }>
+    }
 
 export type PdfEngineGatewayConfig = {
   authToken?: string
@@ -68,16 +86,16 @@ type PdfEngineRequestStep =
 
 const PDF_ENGINE_PRODUCT_BASE_PATH = "/api/v1"
 const REQUEST_TIMEOUT_MS = 30_000
-const PDF_FILE_SIGNATURE = new Uint8Array([
-  0x25, 0x50, 0x44, 0x46, 0x2d
-])
-const ZIP_FILE_SIGNATURE = new Uint8Array([
-  0x50, 0x4b, 0x03, 0x04
-])
+const PDF_MEDIA_TYPE = "application/pdf"
+const ZIP_MEDIA_TYPE = "application/zip"
+const OCTET_STREAM_MEDIA_TYPE = "application/octet-stream"
+const PDF_FILE_SIGNATURE = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])
+const ZIP_FILE_SIGNATURE = new Uint8Array([0x50, 0x4b, 0x03, 0x04])
 
 const DEFAULT_RESULT_FILE_NAME_BY_ACTION: Record<PdfEngineActionKind, string> = {
   "compress-pdf": "compressed.pdf",
-  "split-pdf": "split.zip"
+  "split-pdf": "split.zip",
+  "merge-pdf": "merged.pdf"
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
@@ -109,10 +127,7 @@ const isPdfEngineOperationJob = (
   )
 }
 
-const resolveRequestUrl = (
-  baseUrl: string,
-  pathName: string
-): string => {
+const resolveRequestUrl = (baseUrl: string, pathName: string): string => {
   return `${baseUrl}${PDF_ENGINE_PRODUCT_BASE_PATH}${pathName}`
 }
 
@@ -175,11 +190,19 @@ const getDefaultResultFileName = (
   actionKind: PdfEngineActionKind,
   mediaType: string
 ): string => {
-  if (actionKind === "split-pdf" && mediaType === "application/pdf") {
+  if (actionKind === "split-pdf" && mediaType === PDF_MEDIA_TYPE) {
     return "split.pdf"
   }
 
   return DEFAULT_RESULT_FILE_NAME_BY_ACTION[actionKind]
+}
+
+const decodeFileNameValue = (value: string): string => {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
 }
 
 const parseFileNameFromContentDisposition = (
@@ -191,13 +214,23 @@ const parseFileNameFromContentDisposition = (
     return getDefaultResultFileName(actionKind, mediaType)
   }
 
-  const match = /filename="?([^";]+)"?/i.exec(contentDisposition)
+  const encodedMatch = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(contentDisposition)
 
-  if (match === null) {
+  if (encodedMatch !== null) {
+    const encodedFileName = decodeFileNameValue(encodedMatch[1]).trim()
+
+    if (encodedFileName.length > 0) {
+      return encodedFileName
+    }
+  }
+
+  const plainMatch = /filename="?([^";]+)"?/i.exec(contentDisposition)
+
+  if (plainMatch === null) {
     return getDefaultResultFileName(actionKind, mediaType)
   }
 
-  const fileName = match[1].trim()
+  const fileName = decodeFileNameValue(plainMatch[1]).trim()
 
   return fileName.length > 0
     ? fileName
@@ -216,25 +249,54 @@ const createTimeoutSignal = (): AbortSignal => {
   return AbortSignal.timeout(REQUEST_TIMEOUT_MS)
 }
 
+const startsWithSignature = (
+  value: Uint8Array,
+  signature: Uint8Array
+): boolean => {
+  if (value.byteLength < signature.byteLength) {
+    return false
+  }
+
+  for (let index = 0; index < signature.byteLength; index += 1) {
+    if (value[index] !== signature[index]) {
+      return false
+    }
+  }
+
+  return true
+}
+
+const isValidPdfResult = (resultFileContents: Uint8Array): boolean => {
+  return startsWithSignature(resultFileContents, PDF_FILE_SIGNATURE)
+}
+
+const isValidSplitResult = (
+  mediaType: string,
+  resultFileContents: Uint8Array
+): boolean => {
+  if (mediaType === PDF_MEDIA_TYPE) {
+    return startsWithSignature(resultFileContents, PDF_FILE_SIGNATURE)
+  }
+
+  if (mediaType === ZIP_MEDIA_TYPE) {
+    return startsWithSignature(resultFileContents, ZIP_FILE_SIGNATURE)
+  }
+
+  if (mediaType === OCTET_STREAM_MEDIA_TYPE) {
+    return (
+      startsWithSignature(resultFileContents, PDF_FILE_SIGNATURE) ||
+      startsWithSignature(resultFileContents, ZIP_FILE_SIGNATURE)
+    )
+  }
+
+  return false
+}
+
 const buildPdfEngineResponseError = async (
   actionKind: PdfEngineActionKind,
   step: PdfEngineRequestStep,
   response: Response
 ): Promise<PdfEngineGatewayErrorResult> => {
-  const stepLabelByCode: Record<PdfEngineRequestStep, string> = {
-    "document-create": "document creation",
-    "source-upload": "source file upload",
-    "job-create": "job creation",
-    execute: "job execution",
-    "result-download": "result download"
-  }
-  const stepCodeByName: Record<PdfEngineRequestStep, string> = {
-    "document-create": "PDF_ENGINE_DOCUMENT_CREATE_FAILED",
-    "source-upload": "PDF_ENGINE_SOURCE_UPLOAD_FAILED",
-    "job-create": "PDF_ENGINE_JOB_CREATE_FAILED",
-    execute: "PDF_ENGINE_EXECUTION_FAILED",
-    "result-download": "PDF_ENGINE_RESULT_DOWNLOAD_FAILED"
-  }
   const details = await resolveErrorMessageFromResponse(response)
 
   if (response.status === 401 || response.status === 403) {
@@ -253,6 +315,30 @@ const buildPdfEngineResponseError = async (
       502,
       `HTTP ${response.status}. ${details}`
     )
+  }
+
+  if (actionKind === "merge-pdf") {
+    return createGatewayError(
+      "PDF_ENGINE_MERGE_FAILED",
+      "PDF engine merge execution failed.",
+      502,
+      `HTTP ${response.status}. ${details}`
+    )
+  }
+
+  const stepLabelByCode: Record<PdfEngineRequestStep, string> = {
+    "document-create": "document creation",
+    "source-upload": "source file upload",
+    "job-create": "job creation",
+    execute: "job execution",
+    "result-download": "result download"
+  }
+  const stepCodeByName: Record<PdfEngineRequestStep, string> = {
+    "document-create": "PDF_ENGINE_DOCUMENT_CREATE_FAILED",
+    "source-upload": "PDF_ENGINE_SOURCE_UPLOAD_FAILED",
+    "job-create": "PDF_ENGINE_JOB_CREATE_FAILED",
+    execute: "PDF_ENGINE_EXECUTION_FAILED",
+    "result-download": "PDF_ENGINE_RESULT_DOWNLOAD_FAILED"
   }
 
   return createGatewayError(
@@ -297,19 +383,27 @@ const createPdfEngineDocument = async (
   return payload
 }
 
-const uploadSourceFileToPdfEngine = async (
-  authToken: string,
-  baseUrl: string,
-  engineDocumentId: string,
-  sourceFileName: string,
+const uploadSourceFileToPdfEngine = async ({
+  authToken,
+  baseUrl,
+  engineDocumentId,
+  sourceFileName,
+  sourceFilePath,
+  actionKind
+}: {
+  authToken: string
+  baseUrl: string
+  engineDocumentId: string
+  sourceFileName: string
   sourceFilePath: string
-): Promise<true | PdfEngineGatewayErrorResult> => {
+  actionKind: PdfEngineActionKind
+}): Promise<true | PdfEngineGatewayErrorResult> => {
   const sourceFileContents = await readFile(sourceFilePath)
   const formData = new FormData()
 
   formData.append(
     "file",
-    new Blob([sourceFileContents], { type: "application/pdf" }),
+    new Blob([sourceFileContents], { type: PDF_MEDIA_TYPE }),
     sourceFileName
   )
 
@@ -327,7 +421,7 @@ const uploadSourceFileToPdfEngine = async (
   )
 
   if (!response.ok) {
-    return buildPdfEngineResponseError("compress-pdf", "source-upload", response)
+    return buildPdfEngineResponseError(actionKind, "source-upload", response)
   }
 
   return true
@@ -345,9 +439,17 @@ const createPdfEngineOperation = async (
           operationType: "split",
           pageRanges: input.pageRanges
         }
-      : {
-          operationType: "compress"
-        }
+      : input.actionKind === "merge-pdf"
+        ? {
+            operationType: "merge",
+            sourceDocumentIds: input.sourceDocumentIds,
+            excludePageRanges: input.excludePageRanges,
+            pageNumberingMode: input.pageNumberingMode
+          }
+        : {
+            operationType: "compress"
+          }
+
   const response = await fetch(
     resolveRequestUrl(
       baseUrl,
@@ -374,10 +476,14 @@ const createPdfEngineOperation = async (
     return createGatewayError(
       input.actionKind === "split-pdf"
         ? "PDF_ENGINE_SPLIT_FAILED"
-        : "PDF_ENGINE_JOB_CREATE_INVALID_RESPONSE",
+        : input.actionKind === "merge-pdf"
+          ? "PDF_ENGINE_MERGE_FAILED"
+          : "PDF_ENGINE_JOB_CREATE_INVALID_RESPONSE",
       input.actionKind === "split-pdf"
         ? "PDF engine split job creation returned an unexpected response shape."
-        : "PDF engine job creation returned an unexpected response shape."
+        : input.actionKind === "merge-pdf"
+          ? "PDF engine merge job creation returned an unexpected response shape."
+          : "PDF engine job creation returned an unexpected response shape."
     )
   }
 
@@ -413,10 +519,14 @@ const executePdfEngineOperation = async (
     return createGatewayError(
       actionKind === "split-pdf"
         ? "PDF_ENGINE_SPLIT_FAILED"
-        : "PDF_ENGINE_EXECUTION_INVALID_RESPONSE",
+        : actionKind === "merge-pdf"
+          ? "PDF_ENGINE_MERGE_FAILED"
+          : "PDF_ENGINE_EXECUTION_INVALID_RESPONSE",
       actionKind === "split-pdf"
         ? "PDF engine split execution returned an unexpected response shape."
-        : "PDF engine execution returned an unexpected response shape."
+        : actionKind === "merge-pdf"
+          ? "PDF engine merge execution returned an unexpected response shape."
+          : "PDF engine execution returned an unexpected response shape."
     )
   }
 
@@ -424,56 +534,20 @@ const executePdfEngineOperation = async (
     return createGatewayError(
       actionKind === "split-pdf"
         ? "PDF_ENGINE_SPLIT_FAILED"
-        : "PDF_ENGINE_EXECUTION_UNEXPECTED_STATUS",
+        : actionKind === "merge-pdf"
+          ? "PDF_ENGINE_MERGE_FAILED"
+          : "PDF_ENGINE_EXECUTION_UNEXPECTED_STATUS",
       actionKind === "split-pdf"
         ? "PDF engine split execution did not complete successfully."
-        : "PDF engine execution did not complete successfully.",
+        : actionKind === "merge-pdf"
+          ? "PDF engine merge execution did not complete successfully."
+          : "PDF engine execution did not complete successfully.",
       502,
-      payload.message ??
-        `Unexpected engine job status: ${payload.status}.`
+      payload.message ?? `Unexpected engine job status: ${payload.status}.`
     )
   }
 
   return payload
-}
-
-const startsWithSignature = (
-  value: Uint8Array,
-  signature: Uint8Array
-): boolean => {
-  if (value.byteLength < signature.byteLength) {
-    return false
-  }
-
-  for (let index = 0; index < signature.byteLength; index += 1) {
-    if (value[index] !== signature[index]) {
-      return false
-    }
-  }
-
-  return true
-}
-
-const isValidSplitResult = (
-  mediaType: string,
-  resultFileContents: Uint8Array
-): boolean => {
-  if (mediaType === "application/pdf") {
-    return startsWithSignature(resultFileContents, PDF_FILE_SIGNATURE)
-  }
-
-  if (mediaType === "application/zip") {
-    return startsWithSignature(resultFileContents, ZIP_FILE_SIGNATURE)
-  }
-
-  if (mediaType === "application/octet-stream") {
-    return (
-      startsWithSignature(resultFileContents, PDF_FILE_SIGNATURE) ||
-      startsWithSignature(resultFileContents, ZIP_FILE_SIGNATURE)
-    )
-  }
-
-  return false
 }
 
 const downloadPdfEngineResult = async (
@@ -502,28 +576,41 @@ const downloadPdfEngineResult = async (
   const resultFileContents = new Uint8Array(await response.arrayBuffer())
   const mediaType =
     response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ??
-    (actionKind === "split-pdf" ? "application/zip" : "application/pdf")
+    (actionKind === "split-pdf" ? ZIP_MEDIA_TYPE : PDF_MEDIA_TYPE)
 
   if (resultFileContents.byteLength === 0) {
     return createGatewayError(
       actionKind === "split-pdf"
         ? "PDF_ENGINE_SPLIT_RESULT_INVALID"
-        : "PDF_ENGINE_RESULT_EMPTY",
+        : actionKind === "merge-pdf"
+          ? "PDF_ENGINE_MERGE_RESULT_INVALID"
+          : "PDF_ENGINE_RESULT_EMPTY",
       actionKind === "split-pdf"
         ? "PDF engine returned an empty split result artifact."
-        : "PDF engine returned an empty compressed PDF artifact."
+        : actionKind === "merge-pdf"
+          ? "PDF engine returned an empty merged PDF artifact."
+          : "PDF engine returned an empty compressed PDF artifact."
     )
   }
 
-  if (
-    actionKind === "split-pdf" &&
-    !isValidSplitResult(mediaType, resultFileContents)
-  ) {
+  if (actionKind === "split-pdf" && !isValidSplitResult(mediaType, resultFileContents)) {
     return createGatewayError(
       "PDF_ENGINE_SPLIT_RESULT_INVALID",
       "PDF engine returned an unsupported split result artifact.",
       502,
       `Unexpected split result media type: ${mediaType}.`
+    )
+  }
+
+  if (
+    actionKind === "merge-pdf" &&
+    (mediaType !== PDF_MEDIA_TYPE || !isValidPdfResult(resultFileContents))
+  ) {
+    return createGatewayError(
+      "PDF_ENGINE_MERGE_RESULT_INVALID",
+      "PDF engine returned an invalid merge result artifact.",
+      502,
+      `Unexpected merge result media type: ${mediaType}.`
     )
   }
 
@@ -539,6 +626,192 @@ const downloadPdfEngineResult = async (
     ),
     resultFileContents
   }
+}
+
+const submitSingleSourcePdfAction = async (
+  config: PdfEngineGatewayConfig,
+  input: Extract<SubmitPdfActionInput, { actionKind: "compress-pdf" | "split-pdf" }>
+): Promise<PdfEngineActionSubmissionResult> => {
+  const engineDocument = await createPdfEngineDocument(
+    config.authToken!,
+    config.baseUrl!,
+    input.documentName
+  )
+
+  if (isGatewayErrorResult(engineDocument)) {
+    if (input.actionKind === "split-pdf" && engineDocument.code !== "PDF_ENGINE_AUTH_INVALID") {
+      return createGatewayError(
+        "PDF_ENGINE_SPLIT_FAILED",
+        "PDF engine split setup failed.",
+        engineDocument.statusCode,
+        engineDocument.details
+      )
+    }
+
+    return engineDocument
+  }
+
+  const uploadResult = await uploadSourceFileToPdfEngine({
+    authToken: config.authToken!,
+    baseUrl: config.baseUrl!,
+    engineDocumentId: engineDocument.id,
+    sourceFileName: input.sourceFileName,
+    sourceFilePath: input.sourceFilePath,
+    actionKind: input.actionKind
+  })
+
+  if (uploadResult !== true) {
+    if (input.actionKind === "split-pdf" && uploadResult.code !== "PDF_ENGINE_AUTH_INVALID") {
+      return createGatewayError(
+        "PDF_ENGINE_SPLIT_FAILED",
+        "PDF engine split setup failed.",
+        uploadResult.statusCode,
+        uploadResult.details
+      )
+    }
+
+    return uploadResult
+  }
+
+  const operationJob = await createPdfEngineOperation(
+    config.authToken!,
+    config.baseUrl!,
+    input,
+    engineDocument.id
+  )
+
+  if (isGatewayErrorResult(operationJob)) {
+    return operationJob
+  }
+
+  const executionResult = await executePdfEngineOperation(
+    config.authToken!,
+    config.baseUrl!,
+    input.actionKind,
+    engineDocument.id,
+    operationJob.id
+  )
+
+  if (isGatewayErrorResult(executionResult)) {
+    return executionResult
+  }
+
+  return downloadPdfEngineResult(
+    config.authToken!,
+    config.baseUrl!,
+    input.actionKind,
+    engineDocument.id,
+    operationJob.id
+  )
+}
+
+const submitMergePdfAction = async (
+  config: PdfEngineGatewayConfig,
+  input: Extract<SubmitPdfActionInput, { actionKind: "merge-pdf" }>
+): Promise<PdfEngineActionSubmissionResult> => {
+  if (input.sourceDocuments.length < 2) {
+    return createGatewayError(
+      "MERGE_SOURCE_DOCUMENTS_REQUIRED",
+      "Merge PDF requires at least two uploaded PDF documents including the current document.",
+      400
+    )
+  }
+
+  const primarySource = input.sourceDocuments[0]
+
+  if (primarySource === undefined) {
+    return createGatewayError(
+      "MERGE_SOURCE_DOCUMENTS_REQUIRED",
+      "Merge PDF requires a primary source document.",
+      400
+    )
+  }
+
+  const primaryEngineDocument = await createPdfEngineDocument(
+    config.authToken!,
+    config.baseUrl!,
+    primarySource.documentName
+  )
+
+  if (isGatewayErrorResult(primaryEngineDocument)) {
+    return primaryEngineDocument
+  }
+
+  const primaryUploadResult = await uploadSourceFileToPdfEngine({
+    authToken: config.authToken!,
+    baseUrl: config.baseUrl!,
+    engineDocumentId: primaryEngineDocument.id,
+    sourceFileName: primarySource.sourceFileName,
+    sourceFilePath: primarySource.sourceFilePath,
+    actionKind: "merge-pdf"
+  })
+
+  if (primaryUploadResult !== true) {
+    return primaryUploadResult
+  }
+
+  const additionalEngineDocumentIds: string[] = []
+
+  for (const sourceDocument of input.sourceDocuments.slice(1)) {
+    const engineDocument = await createPdfEngineDocument(
+      config.authToken!,
+      config.baseUrl!,
+      sourceDocument.documentName
+    )
+
+    if (isGatewayErrorResult(engineDocument)) {
+      return engineDocument
+    }
+
+    const uploadResult = await uploadSourceFileToPdfEngine({
+      authToken: config.authToken!,
+      baseUrl: config.baseUrl!,
+      engineDocumentId: engineDocument.id,
+      sourceFileName: sourceDocument.sourceFileName,
+      sourceFilePath: sourceDocument.sourceFilePath,
+      actionKind: "merge-pdf"
+    })
+
+    if (uploadResult !== true) {
+      return uploadResult
+    }
+
+    additionalEngineDocumentIds.push(engineDocument.id)
+  }
+
+  const operationJob = await createPdfEngineOperation(
+    config.authToken!,
+    config.baseUrl!,
+    {
+      ...input,
+      sourceDocumentIds: additionalEngineDocumentIds
+    },
+    primaryEngineDocument.id
+  )
+
+  if (isGatewayErrorResult(operationJob)) {
+    return operationJob
+  }
+
+  const executionResult = await executePdfEngineOperation(
+    config.authToken!,
+    config.baseUrl!,
+    "merge-pdf",
+    primaryEngineDocument.id,
+    operationJob.id
+  )
+
+  if (isGatewayErrorResult(executionResult)) {
+    return executionResult
+  }
+
+  return downloadPdfEngineResult(
+    config.authToken!,
+    config.baseUrl!,
+    "merge-pdf",
+    primaryEngineDocument.id,
+    operationJob.id
+  )
 }
 
 const submitPdfActionToEngine = async (
@@ -569,76 +842,22 @@ const submitPdfActionToEngine = async (
     )
   }
 
+  if (input.actionKind === "merge-pdf" && input.sourceDocuments.length < 2) {
+    return createGatewayError(
+      "MERGE_SOURCE_DOCUMENTS_REQUIRED",
+      "Merge PDF requires at least two uploaded PDF documents before calling the PDF engine.",
+      400
+    )
+  }
+
   try {
-    const engineDocument = await createPdfEngineDocument(
-      config.authToken,
-      config.baseUrl,
-      input.documentName
-    )
-
-    if (isGatewayErrorResult(engineDocument)) {
-      if (input.actionKind === "split-pdf" && engineDocument.code !== "PDF_ENGINE_AUTH_INVALID") {
-        return createGatewayError(
-          "PDF_ENGINE_SPLIT_FAILED",
-          "PDF engine split setup failed.",
-          engineDocument.statusCode,
-          engineDocument.details
-        )
-      }
-
-      return engineDocument
+    if (input.actionKind === "merge-pdf") {
+      return await submitMergePdfAction(config, input)
     }
 
-    const uploadResult = await uploadSourceFileToPdfEngine(
-      config.authToken,
-      config.baseUrl,
-      engineDocument.id,
-      input.sourceFileName,
-      input.sourceFilePath
-    )
-
-    if (uploadResult !== true) {
-      if (input.actionKind === "split-pdf" && uploadResult.code !== "PDF_ENGINE_AUTH_INVALID") {
-        return createGatewayError(
-          "PDF_ENGINE_SPLIT_FAILED",
-          "PDF engine split setup failed.",
-          uploadResult.statusCode,
-          uploadResult.details
-        )
-      }
-
-      return uploadResult
-    }
-
-    const operationJob = await createPdfEngineOperation(
-      config.authToken,
-      config.baseUrl,
-      input,
-      engineDocument.id
-    )
-
-    if (isGatewayErrorResult(operationJob)) {
-      return operationJob
-    }
-
-    const executionResult = await executePdfEngineOperation(
-      config.authToken,
-      config.baseUrl,
-      input.actionKind,
-      engineDocument.id,
-      operationJob.id
-    )
-
-    if (isGatewayErrorResult(executionResult)) {
-      return executionResult
-    }
-
-    return downloadPdfEngineResult(
-      config.authToken,
-      config.baseUrl,
-      input.actionKind,
-      engineDocument.id,
-      operationJob.id
+    return await submitSingleSourcePdfAction(
+      config,
+      input as Extract<SubmitPdfActionInput, { actionKind: "compress-pdf" | "split-pdf" }>
     )
   } catch (error) {
     const message =

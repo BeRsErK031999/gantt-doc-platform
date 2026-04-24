@@ -21,7 +21,12 @@ export type PlatformDocumentActionKind =
   | "extract-metadata"
   | "generate-derived-document"
 
-export type PdfEngineActionKind = "compress-pdf" | "split-pdf"
+export type MergePdfPageNumberingMode = "none" | "append"
+
+export type PdfEngineActionKind =
+  | "compress-pdf"
+  | "split-pdf"
+  | "merge-pdf"
 
 export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKind
 
@@ -52,6 +57,7 @@ export type DocumentDerivationKind =
   | "document-summary"
   | "compressed-pdf"
   | "split-pdf"
+  | "merge-pdf"
 
 export type DocumentOrigin = {
   documentId: string
@@ -95,11 +101,17 @@ export type CreateDocumentRequest = {
 
 export type RunDocumentActionRequest =
   | {
-      kind: Exclude<DocumentActionKind, "split-pdf">
+      kind: Exclude<DocumentActionKind, "split-pdf" | "merge-pdf">
     }
   | {
       kind: "split-pdf"
       pageRanges: string
+    }
+  | {
+      kind: "merge-pdf"
+      sourceDocumentIds: string[]
+      excludePageRanges?: string
+      pageNumberingMode?: MergePdfPageNumberingMode
     }
 
 type ErrorResponse = {
@@ -149,7 +161,11 @@ const isSourceArtifactStatus = (
 const isDocumentOperationKind = (
   value: unknown
 ): value is PdfEngineActionKind => {
-  return value === "compress-pdf" || value === "split-pdf"
+  return (
+    value === "compress-pdf" ||
+    value === "split-pdf" ||
+    value === "merge-pdf"
+  )
 }
 
 const isDocumentOperationStatus = (
@@ -165,7 +181,8 @@ const isDocumentDerivationKind = (
     value === "converted-pdf" ||
     value === "document-summary" ||
     value === "compressed-pdf" ||
-    value === "split-pdf"
+    value === "split-pdf" ||
+    value === "merge-pdf"
   )
 }
 

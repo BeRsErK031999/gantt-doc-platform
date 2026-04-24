@@ -14,7 +14,7 @@ import type {
   RunDocumentActionRequest
 } from "./documents-api"
 
-type ActiveTool = "compress" | "split"
+export type ActiveTool = "compress" | "split" | "merge"
 
 type UploadState =
   | { kind: "idle" }
@@ -33,6 +33,11 @@ type ActionState =
       technicalDetails?: string
     }
 
+type UploadedMergeSource = {
+  document: DocumentDetails
+  fileName: string
+}
+
 const INITIAL_UPLOAD_STATE: UploadState = { kind: "idle" }
 const INITIAL_ACTION_STATE: ActionState = { kind: "idle" }
 const INITIAL_PAGE_RANGES = "1"
@@ -46,12 +51,14 @@ const TOOL_CONTENT: Record<
     resultDescription: string
     successMessage: string
     title: string
+    uploadLabel: string
   }
 > = {
   compress: {
     title: "Compress PDF",
     actionLabel: "Compress",
     pendingActionLabel: "Compressing...",
+    uploadLabel: "Upload file",
     description:
       "Upload a PDF, create a document automatically, then run the existing compression action.",
     resultDescription:
@@ -62,11 +69,23 @@ const TOOL_CONTENT: Record<
     title: "Split PDF",
     actionLabel: "Split",
     pendingActionLabel: "Splitting...",
+    uploadLabel: "Upload file",
     description:
       "Upload a PDF, create a document automatically, then run the existing split action with page ranges.",
     resultDescription:
       "The backend creates a derived split result and keeps operation history on the source document.",
     successMessage: "Split result is ready to download."
+  },
+  merge: {
+    title: "Merge PDF",
+    actionLabel: "Merge",
+    pendingActionLabel: "Merging...",
+    uploadLabel: "Upload files",
+    description:
+      "Choose multiple PDFs, create documents for each upload, then merge them through the external PDF engine.",
+    resultDescription:
+      "The first uploaded PDF becomes the root document, additional PDFs are sent as ordered merge sources, and the merged PDF is saved as a derived document.",
+    successMessage: "Merged PDF is ready to download."
   }
 }
 
@@ -122,28 +141,38 @@ export const ToolPanel = ({
 }) => {
   const toolContent = TOOL_CONTENT[activeTool]
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [fileInputKey, setFileInputKey] = useState<number>(0)
   const [pageRanges, setPageRanges] = useState<string>(INITIAL_PAGE_RANGES)
   const [uploadState, setUploadState] = useState<UploadState>(INITIAL_UPLOAD_STATE)
   const [actionState, setActionState] = useState<ActionState>(INITIAL_ACTION_STATE)
   const [workingDocument, setWorkingDocument] = useState<DocumentDetails | null>(null)
   const [resultDocument, setResultDocument] = useState<DerivedDocument | null>(null)
+  const [uploadedMergeSources, setUploadedMergeSources] = useState<
+    UploadedMergeSource[]
+  >([])
 
   useEffect(() => {
     setSelectedFile(null)
+    setSelectedFiles([])
     setFileInputKey(0)
     setPageRanges(INITIAL_PAGE_RANGES)
     setUploadState(INITIAL_UPLOAD_STATE)
     setActionState(INITIAL_ACTION_STATE)
     setWorkingDocument(null)
     setResultDocument(null)
+    setUploadedMergeSources([])
   }, [activeTool])
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
-    setSelectedFile(event.currentTarget.files?.[0] ?? null)
+    if (activeTool === "merge") {
+      setSelectedFiles(Array.from(event.currentTarget.files ?? []))
+    } else {
+      setSelectedFile(event.currentTarget.files?.[0] ?? null)
+    }
+
     setUploadState(INITIAL_UPLOAD_STATE)
     setActionState(INITIAL_ACTION_STATE)
-    setWorkingDocument(null)
     setResultDocument(null)
   }
 
@@ -151,6 +180,60 @@ export const ToolPanel = ({
     event: FormEvent<HTMLFormElement>
   ): Promise<void> => {
     event.preventDefault()
+
+    if (activeTool === "merge") {
+      if (selectedFiles.length === 0) {
+        setUploadState({
+          kind: "error",
+          message: "Choose at least one PDF file before uploading."
+        })
+
+        return
+      }
+
+      setUploadState({ kind: "submitting" })
+      setActionState(INITIAL_ACTION_STATE)
+      setResultDocument(null)
+
+      try {
+        const uploadedDocuments: UploadedMergeSource[] = []
+
+        for (const file of selectedFiles) {
+          const createdDocument = await createDocument({
+            name: getDocumentNameFromFile(file.name),
+            kind: "pdf"
+          })
+          const updatedDocument = await uploadDocumentSourceFile(
+            createdDocument.id,
+            file
+          )
+
+          uploadedDocuments.push({
+            document: updatedDocument,
+            fileName: file.name
+          })
+        }
+
+        setUploadedMergeSources(uploadedDocuments)
+        setWorkingDocument(uploadedDocuments[0]?.document ?? null)
+        setSelectedFiles([])
+        setFileInputKey((currentValue) => currentValue + 1)
+        setUploadState({
+          kind: "success",
+          message: `${uploadedDocuments.length} PDF files uploaded and registered as merge sources.`
+        })
+      } catch (error) {
+        setUploadedMergeSources([])
+        setWorkingDocument(null)
+        setResultDocument(null)
+        setUploadState({
+          kind: "error",
+          message: error instanceof Error ? error.message : "Unknown error"
+        })
+      }
+
+      return
+    }
 
     if (selectedFile === null) {
       setUploadState({
@@ -184,11 +267,9 @@ export const ToolPanel = ({
       })
     } catch (error) {
       setWorkingDocument(null)
-      const message = error instanceof Error ? error.message : "Unknown error"
-
       setUploadState({
         kind: "error",
-        message
+        message: error instanceof Error ? error.message : "Unknown error"
       })
     }
   }
@@ -197,7 +278,10 @@ export const ToolPanel = ({
     if (workingDocument === null) {
       setActionState({
         kind: "error",
-        message: "Upload a PDF first."
+        message:
+          activeTool === "merge"
+            ? "Upload at least two PDFs first."
+            : "Upload a PDF first."
       })
 
       return
@@ -212,15 +296,32 @@ export const ToolPanel = ({
       return
     }
 
+    if (activeTool === "merge" && uploadedMergeSources.length < 2) {
+      setActionState({
+        kind: "error",
+        message: "Upload at least two PDFs before running merge."
+      })
+
+      return
+    }
+
     const request: RunDocumentActionRequest =
       activeTool === "split"
         ? {
             kind: "split-pdf",
             pageRanges: pageRanges.trim()
           }
-        : {
-            kind: "compress-pdf"
-          }
+        : activeTool === "merge"
+          ? {
+              kind: "merge-pdf",
+              sourceDocumentIds: uploadedMergeSources
+                .slice(1)
+                .map((source) => source.document.id),
+              pageNumberingMode: "none"
+            }
+          : {
+              kind: "compress-pdf"
+            }
 
     setActionState({ kind: "submitting" })
 
@@ -249,11 +350,9 @@ export const ToolPanel = ({
         return
       }
 
-      const message = error instanceof Error ? error.message : "Unknown error"
-
       setActionState({
         kind: "error",
-        message
+        message: error instanceof Error ? error.message : "Unknown error"
       })
     }
   }
@@ -294,11 +393,12 @@ export const ToolPanel = ({
             onSubmit={(event) => void handleUploadSubmit(event)}
           >
             <label className="field upload-field">
-              <span>Upload file</span>
+              <span>{activeTool === "merge" ? "Upload PDF files" : "Upload file"}</span>
               <input
                 key={fileInputKey}
                 accept=".pdf,application/pdf"
                 type="file"
+                multiple={activeTool === "merge"}
                 onChange={handleFileChange}
                 disabled={
                   uploadState.kind === "submitting" ||
@@ -311,14 +411,29 @@ export const ToolPanel = ({
               className="primary-button"
               type="submit"
               disabled={
-                selectedFile === null ||
+                (activeTool === "merge"
+                  ? selectedFiles.length === 0
+                  : selectedFile === null) ||
                 uploadState.kind === "submitting" ||
                 actionState.kind === "submitting"
               }
             >
-              {uploadState.kind === "submitting" ? "Uploading..." : "Upload file"}
+              {uploadState.kind === "submitting"
+                ? "Uploading..."
+                : toolContent.uploadLabel}
             </button>
           </form>
+
+          {activeTool === "merge" && selectedFiles.length > 0 ? (
+            <div className="tool-result-card">
+              <div>
+                <p className="details-list-title">Selected files</p>
+                <p className="details-list-meta">
+                  {selectedFiles.map((file) => file.name).join(", ")}
+                </p>
+              </div>
+            </div>
+          ) : null}
 
           {activeTool === "split" ? (
             <label className="field tool-field">
@@ -340,7 +455,8 @@ export const ToolPanel = ({
               disabled={
                 workingDocument === null ||
                 actionState.kind === "submitting" ||
-                (activeTool === "split" && pageRanges.trim().length === 0)
+                (activeTool === "split" && pageRanges.trim().length === 0) ||
+                (activeTool === "merge" && uploadedMergeSources.length < 2)
               }
               onClick={() => void handleActionSubmit()}
             >
@@ -362,7 +478,7 @@ export const ToolPanel = ({
           {workingDocument !== null ? (
             <dl className="tool-summary">
               <div>
-                <dt>Document ID</dt>
+                <dt>Root document ID</dt>
                 <dd>
                   <code>{workingDocument.id}</code>
                 </dd>
@@ -380,6 +496,31 @@ export const ToolPanel = ({
                 <dd>{workingDocument.derivedDocuments.length}</dd>
               </div>
             </dl>
+          ) : null}
+
+          {activeTool === "merge" && uploadedMergeSources.length > 0 ? (
+            <div className="details-section">
+              <div className="section-header compact-section-header">
+                <h3>Uploaded merge sources</h3>
+                <p>The first uploaded PDF is used as the root document and first merge source.</p>
+              </div>
+
+              <ul className="details-list">
+                {uploadedMergeSources.map((source, index) => (
+                  <li className="details-list-item" key={source.document.id}>
+                    <div>
+                      <p className="details-list-title">
+                        {index === 0 ? "Root source" : `Additional source ${index}`}
+                      </p>
+                      <p className="details-list-caption">{source.fileName}</p>
+                      <p className="details-list-meta">
+                        Document ID: <code>{source.document.id}</code>
+                      </p>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : null}
 
           {uploadState.kind === "success" ? (

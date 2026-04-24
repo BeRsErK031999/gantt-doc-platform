@@ -18,7 +18,9 @@ import type {
   DocumentDetails,
   DocumentKind,
   DocumentOperation,
-  DocumentSummary
+  DocumentSummary,
+  MergePdfActionInput,
+  MergePdfPageNumberingMode
 } from "./document.js"
 import type { DocumentActionKind, PdfEngineActionKind } from "./document.js"
 import type { DocumentsStore } from "./documents-store.js"
@@ -38,12 +40,13 @@ export type RunDocumentActionResult =
 
 export type RunDocumentActionInput =
   | {
-      kind: Exclude<DocumentActionKind, "split-pdf">
+      kind: Exclude<DocumentActionKind, "split-pdf" | "merge-pdf">
     }
   | {
       kind: "split-pdf"
       pageRanges: string
     }
+  | MergePdfActionInput
 
 export type UploadDocumentSourceFileInput = {
   contents: Uint8Array
@@ -83,6 +86,11 @@ export type DocumentsService = {
     documentId: string,
     input: RunDocumentActionInput
   ) => Promise<RunDocumentActionResult>
+}
+
+type MergePdfSourceDocument = {
+  document: Document
+  sourceFilePath: string
 }
 
 const createActionError = ({
@@ -204,12 +212,17 @@ const resolveGeneratedDerivationKind = (
   return "document-summary"
 }
 
-const buildDerivedDocumentName = (
-  document: Document,
-  derivationKind: DocumentDerivationKind,
-  nextIndex: number,
+const buildDerivedDocumentName = ({
+  document,
+  derivationKind,
+  nextIndex,
+  engineRequestId
+}: {
+  document: Document
+  derivationKind: DocumentDerivationKind
   engineRequestId: string | null
-): string => {
+  nextIndex: number
+}): string => {
   const trimmedName = document.name.trim()
 
   switch (derivationKind) {
@@ -221,6 +234,8 @@ const buildDerivedDocumentName = (
       return `${trimmedName} compressed PDF placeholder (stub ${engineRequestId ?? "local"})`
     case "split-pdf":
       return `${trimmedName} split PDF placeholder (stub ${engineRequestId ?? "local"})`
+    case "merge-pdf":
+      return `${trimmedName} merged PDF placeholder (stub ${engineRequestId ?? "local"})`
   }
 }
 
@@ -236,12 +251,12 @@ const buildDerivedDocument = ({
   nextIndex: number
 }): Document => {
   const documentId = randomUUID()
-  const documentName = buildDerivedDocumentName(
+  const documentName = buildDerivedDocumentName({
     document,
     derivationKind,
-    nextIndex,
-    engineRequestId
-  )
+    engineRequestId,
+    nextIndex
+  })
   const documentKind = resolveDocumentKindForDerivation(derivationKind)
   const createdAt = new Date().toISOString()
 
@@ -285,7 +300,10 @@ const buildPdfEngineDerivedDocument = ({
   savedFilePath,
   sizeBytes
 }: {
-  derivationKind: Extract<DocumentDerivationKind, "compressed-pdf" | "split-pdf">
+  derivationKind: Extract<
+    DocumentDerivationKind,
+    "compressed-pdf" | "split-pdf" | "merge-pdf"
+  >
   derivedDocumentId: string
   document: Document
   fileName: string
@@ -298,7 +316,9 @@ const buildPdfEngineDerivedDocument = ({
   const documentName =
     derivationKind === "compressed-pdf"
       ? `${document.name.trim()} compressed PDF`
-      : `${document.name.trim()} split PDF`
+      : derivationKind === "split-pdf"
+        ? `${document.name.trim()} split PDF`
+        : `${document.name.trim()} merged PDF`
 
   return {
     id: derivedDocumentId,
@@ -331,6 +351,182 @@ const buildPdfEngineDerivedDocument = ({
     },
     derivedDocuments: []
   }
+}
+
+const getOperationErrorMessage = (
+  actionKind: PdfEngineActionKind,
+  errorCode: string
+): string => {
+  if (actionKind === "merge-pdf") {
+    switch (errorCode) {
+      case "MERGE_SOURCE_DOCUMENTS_REQUIRED":
+        return "Merge PDF requires at least one additional uploaded PDF source."
+      case "MERGE_SOURCE_DOCUMENT_NOT_FOUND":
+        return "One of the merge source documents was not found."
+      case "MERGE_SOURCE_DOCUMENT_UNSUPPORTED_KIND":
+        return "Every merge source must be a PDF document."
+      case "MERGE_SOURCE_FILE_NOT_UPLOADED":
+        return "Every merge source must have an uploaded source PDF."
+      case "MERGE_SOURCE_FILE_MISSING":
+        return "One of the uploaded merge source PDFs is missing on disk."
+      default:
+        return "Merged PDF action failed."
+    }
+  }
+
+  return actionKind === "split-pdf"
+    ? "Split PDF action failed."
+    : "Compressed PDF action failed."
+}
+
+const resolveSourceFilePath = async (
+  document: Document,
+  localFileStorage: LocalDocumentFileStorage,
+  errorCodes: {
+    missing: string
+    pathInvalid: string
+    storageUnavailable: string
+    notUploaded: string
+  },
+  actionErrorMessage: string
+): Promise<
+  | {
+      kind: "ready"
+      absolutePath: string
+    }
+  | Extract<RunDocumentActionResult, { kind: "error" }>
+> => {
+  if (document.sourceArtifact.status !== "uploaded") {
+    return createActionError({
+      code: errorCodes.notUploaded,
+      message: actionErrorMessage,
+      statusCode: 400
+    })
+  }
+
+  if (
+    document.sourceArtifact.storageKind !== "local-file" ||
+    document.sourceArtifact.path === undefined
+  ) {
+    return createActionError({
+      code: errorCodes.storageUnavailable,
+      message:
+        "Source artifact is not backed by a local file path and cannot be sent to the PDF engine.",
+      statusCode: 400
+    })
+  }
+
+  const sourceFilePath = document.sourceArtifact.path
+
+  if (!(await localFileStorage.storagePathExists(sourceFilePath))) {
+    return createActionError({
+      code: errorCodes.missing,
+      details: `Missing storage path: ${sourceFilePath}`,
+      message: "Uploaded source PDF could not be found in local storage.",
+      statusCode: 400
+    })
+  }
+
+  try {
+    return {
+      kind: "ready",
+      absolutePath: localFileStorage.resolveStorageAbsolutePath(sourceFilePath)
+    }
+  } catch (error) {
+    return createActionError({
+      code: errorCodes.pathInvalid,
+      details: error instanceof Error ? error.message : "Unknown storage path error.",
+      message: "Source file path is invalid and cannot be resolved.",
+      statusCode: 400
+    })
+  }
+}
+
+const validateMergeSourceDocuments = async ({
+  rootDocument,
+  input,
+  localFileStorage,
+  store
+}: {
+  rootDocument: Document
+  input: MergePdfActionInput
+  localFileStorage: LocalDocumentFileStorage
+  store: DocumentsStore
+}): Promise<
+  | {
+      kind: "ready"
+      sources: MergePdfSourceDocument[]
+    }
+  | Extract<RunDocumentActionResult, { kind: "error" }>
+> => {
+  if (input.sourceDocumentIds.length === 0) {
+    return createActionError({
+      code: "MERGE_SOURCE_DOCUMENTS_REQUIRED",
+      message:
+        "Merge PDF requires at least one additional source document because the current document is always the first merge source.",
+      statusCode: 400
+    })
+  }
+
+  const orderedSourceDocuments = [
+    rootDocument,
+    ...input.sourceDocumentIds.map((sourceDocumentId) => {
+      return store.getDocumentById(sourceDocumentId)
+    })
+  ]
+
+  const sourceDocuments: MergePdfSourceDocument[] = []
+
+  for (const sourceDocument of orderedSourceDocuments) {
+    if (sourceDocument === null) {
+      return createActionError({
+        code: "MERGE_SOURCE_DOCUMENT_NOT_FOUND",
+        message: "Merge PDF source document was not found.",
+        statusCode: 400
+      })
+    }
+
+    if (sourceDocument.kind !== "pdf") {
+      return createActionError({
+        code: "MERGE_SOURCE_DOCUMENT_UNSUPPORTED_KIND",
+        message:
+          "Merge PDF only supports PDF source documents. DOCX and ZIP sources are not allowed.",
+        statusCode: 400
+      })
+    }
+
+    const resolvedSourceFilePath = await resolveSourceFilePath(
+      sourceDocument,
+      localFileStorage,
+      {
+        missing: "MERGE_SOURCE_FILE_MISSING",
+        pathInvalid: "MERGE_SOURCE_FILE_MISSING",
+        storageUnavailable: "MERGE_SOURCE_FILE_NOT_UPLOADED",
+        notUploaded: "MERGE_SOURCE_FILE_NOT_UPLOADED"
+      },
+      "Every merge source must have an uploaded source PDF before running merge-pdf."
+    )
+
+    if (resolvedSourceFilePath.kind !== "ready") {
+      return resolvedSourceFilePath
+    }
+
+    sourceDocuments.push({
+      document: sourceDocument,
+      sourceFilePath: resolvedSourceFilePath.absolutePath
+    })
+  }
+
+  return {
+    kind: "ready",
+    sources: sourceDocuments
+  }
+}
+
+const getMergePageNumberingMode = (
+  input: MergePdfActionInput
+): MergePdfPageNumberingMode => {
+  return input.pageNumberingMode ?? "none"
 }
 
 export const createDocumentsService = (
@@ -545,64 +741,106 @@ export const createDocumentsService = (
         )
       }
 
-      if (document.sourceArtifact.status !== "uploaded") {
-        return storeFailedOperation(
-          createActionError({
-            code: "SOURCE_FILE_NOT_UPLOADED",
-            message:
-              actionKind === "split-pdf"
-                ? "Source file is not uploaded yet. Upload a local PDF file before running split-pdf."
-                : "Source file is not uploaded yet. Upload a local PDF file before running compress-pdf.",
-            statusCode: 400
+      if (actionKind === "merge-pdf") {
+        const validatedSources = await validateMergeSourceDocuments({
+          rootDocument: document,
+          input,
+          localFileStorage,
+          store
+        })
+
+        if (validatedSources.kind !== "ready") {
+          return storeFailedOperation(validatedSources)
+        }
+
+        const pdfEngineResult = await pdfEngineGateway.submitPdfAction({
+          actionKind,
+          documentId: document.id,
+          documentName: document.name,
+          sourceDocumentIds: input.sourceDocumentIds,
+          excludePageRanges: input.excludePageRanges,
+          pageNumberingMode: getMergePageNumberingMode(input),
+          sourceDocuments: validatedSources.sources.map((source) => {
+            return {
+              documentId: source.document.id,
+              documentName: source.document.name,
+              sourceFileName: source.document.metadata.sourceFileName,
+              sourceFilePath: source.sourceFilePath
+            }
+          })
+        })
+
+        if (pdfEngineResult.kind === "error") {
+          return storeFailedOperation(pdfEngineResult)
+        }
+
+        const derivedDocumentId = randomUUID()
+        let savedDerivedFilePath: string
+
+        try {
+          savedDerivedFilePath = (
+            await localFileStorage.saveDerivedDocumentFile({
+              contents: pdfEngineResult.resultFileContents,
+              derivedDocumentId,
+              fileName: pdfEngineResult.resultFileName,
+              originDocumentId: document.id
+            })
+          ).path
+        } catch (error) {
+          return storeFailedOperation(
+            createActionError({
+              code: "LOCAL_DERIVED_FILE_SAVE_FAILED",
+              details: error instanceof Error ? error.message : "Unknown local storage error.",
+              message: "Merged PDF was created but could not be saved locally.",
+              statusCode: 500
+            })
+          )
+        }
+
+        const updatedDocument = store.updateDocument(
+          prependDocumentOperation(
+            document,
+            finalizeDocumentOperation({
+              operation,
+              status: "completed"
+            })
+          )
+        )
+
+        store.createDocument(
+          buildPdfEngineDerivedDocument({
+            derivationKind: "merge-pdf",
+            document,
+            derivedDocumentId,
+            fileName: pdfEngineResult.resultFileName,
+            mediaType: pdfEngineResult.mediaType,
+            savedFilePath: savedDerivedFilePath,
+            sizeBytes: pdfEngineResult.resultFileContents.byteLength
           })
         )
+
+        return {
+          kind: "updated",
+          document: withDerivedDocuments(updatedDocument, store.listDocuments())
+        }
       }
 
-      if (
-        document.sourceArtifact.storageKind !== "local-file" ||
-        document.sourceArtifact.path === undefined
-      ) {
-        return storeFailedOperation(
-          createActionError({
-            code: "SOURCE_FILE_STORAGE_UNAVAILABLE",
-            message:
-              "Source artifact is not backed by a local file path and cannot be sent to the PDF engine.",
-            statusCode: 400
-          })
-        )
-      }
+      const resolvedSourceFilePath = await resolveSourceFilePath(
+        document,
+        localFileStorage,
+        {
+          missing: "SOURCE_FILE_MISSING",
+          pathInvalid: "SOURCE_FILE_PATH_INVALID",
+          storageUnavailable: "SOURCE_FILE_STORAGE_UNAVAILABLE",
+          notUploaded: "SOURCE_FILE_NOT_UPLOADED"
+        },
+        actionKind === "split-pdf"
+          ? "Source file is not uploaded yet. Upload a local PDF file before running split-pdf."
+          : "Source file is not uploaded yet. Upload a local PDF file before running compress-pdf."
+      )
 
-      const sourceFilePath = document.sourceArtifact.path
-
-      if (!(await localFileStorage.storagePathExists(sourceFilePath))) {
-        return storeFailedOperation(
-          createActionError({
-            code: "SOURCE_FILE_MISSING",
-            details: `Missing storage path: ${sourceFilePath}`,
-            message:
-              "Uploaded source PDF could not be found in local storage.",
-            statusCode: 400
-          })
-        )
-      }
-
-      let absoluteSourceFilePath: string
-
-      try {
-        absoluteSourceFilePath =
-          localFileStorage.resolveStorageAbsolutePath(sourceFilePath)
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unknown storage path error."
-
-        return storeFailedOperation(
-          createActionError({
-            code: "SOURCE_FILE_PATH_INVALID",
-            details: message,
-            message: "Source file path is invalid and cannot be resolved.",
-            statusCode: 400
-          })
-        )
+      if (resolvedSourceFilePath.kind !== "ready") {
+        return storeFailedOperation(resolvedSourceFilePath)
       }
 
       const pdfEngineResult = await pdfEngineGateway.submitPdfAction({
@@ -611,7 +849,7 @@ export const createDocumentsService = (
         documentName: document.name,
         pageRanges: input.kind === "split-pdf" ? input.pageRanges : undefined,
         sourceFileName: document.metadata.sourceFileName,
-        sourceFilePath: absoluteSourceFilePath
+        sourceFilePath: resolvedSourceFilePath.absolutePath
       })
 
       if (pdfEngineResult.kind === "error") {
@@ -631,17 +869,11 @@ export const createDocumentsService = (
           })
         ).path
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unknown local storage error."
-
         return storeFailedOperation(
           createActionError({
             code: "LOCAL_DERIVED_FILE_SAVE_FAILED",
-            details: message,
-            message:
-              actionKind === "split-pdf"
-                ? "Split PDF result was created but could not be saved locally."
-                : "Compressed PDF was created but could not be saved locally.",
+            details: error instanceof Error ? error.message : "Unknown local storage error.",
+            message: getOperationErrorMessage(actionKind, "LOCAL_DERIVED_FILE_SAVE_FAILED"),
             statusCode: 500
           })
         )

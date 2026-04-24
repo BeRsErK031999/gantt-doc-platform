@@ -147,6 +147,7 @@ const isDocumentDerivationKind = (
     value === "document-summary" ||
     value === "compressed-pdf" ||
     value === "split-pdf" ||
+    value === "merge-pdf" ||
     value === "split-pdf-set"
   )
 }

@@ -1,8 +1,7 @@
 import { useState } from "react"
 
 import { ToolPanel } from "./ToolPanel"
-
-type ActiveTool = "compress" | "split"
+import type { ActiveTool } from "./ToolPanel"
 
 type ToolDefinition = {
   description: string
@@ -22,6 +21,12 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
     title: "Split PDF",
     description:
       "Upload a PDF, define page ranges, run split through the existing backend flow, and download the ZIP result."
+  },
+  {
+    id: "merge",
+    title: "Merge PDF",
+    description:
+      "Upload multiple PDFs, run merge through the external PDF engine, and download the merged derived PDF."
   }
 ]
 
