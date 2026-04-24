@@ -1,4 +1,11 @@
+import { useEffect, useState } from "react"
+import type { ChangeEvent, FormEvent } from "react"
+
 import { DocumentActionsPanel } from "./DocumentActionsPanel"
+import {
+  buildDerivedDocumentDownloadUrl,
+  uploadDocumentSourceFile
+} from "./documents-api"
 import type { DocumentDetails } from "./documents-api"
 import {
   formatCreatedAt,
@@ -25,6 +32,12 @@ const MetadataValue = ({
   return <dd className={isMissing ? "details-value is-placeholder" : "details-value"}>{value}</dd>
 }
 
+type UploadState =
+  | { kind: "idle" }
+  | { kind: "submitting" }
+  | { kind: "success"; message: string }
+  | { kind: "error"; message: string }
+
 export const DocumentDetailsPanel = ({
   document,
   onDocumentUpdated,
@@ -35,6 +48,69 @@ export const DocumentDetailsPanel = ({
   onOpenDocument: (documentId: string) => void
 }) => {
   const origin = document.origin
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [uploadState, setUploadState] = useState<UploadState>({ kind: "idle" })
+
+  useEffect(() => {
+    setSelectedFile(null)
+    setUploadState({ kind: "idle" })
+  }, [document.id])
+
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
+    setSelectedFile(event.currentTarget.files?.[0] ?? null)
+    setUploadState({ kind: "idle" })
+  }
+
+  const handleUploadSubmit = async (
+    event: FormEvent<HTMLFormElement>
+  ): Promise<void> => {
+    event.preventDefault()
+
+    if (selectedFile === null) {
+      setUploadState({
+        kind: "error",
+        message: "Choose a PDF or DOCX file before uploading."
+      })
+
+      return
+    }
+
+    setUploadState({ kind: "submitting" })
+
+    try {
+      const updatedDocument = await uploadDocumentSourceFile(
+        document.id,
+        selectedFile
+      )
+
+      await onDocumentUpdated(updatedDocument)
+      setSelectedFile(null)
+      setUploadState({
+        kind: "success",
+        message: "Source file uploaded."
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error"
+
+      setUploadState({
+        kind: "error",
+        message
+      })
+    }
+  }
+
+  const handleDerivedDocumentDownload = (derivedDocumentId: string): void => {
+    const downloadLink = window.document.createElement("a")
+
+    downloadLink.href = buildDerivedDocumentDownloadUrl(
+      document.id,
+      derivedDocumentId
+    )
+    downloadLink.rel = "noopener"
+    window.document.body.append(downloadLink)
+    downloadLink.click()
+    downloadLink.remove()
+  }
 
   return (
     <div className="details-card">
@@ -73,7 +149,7 @@ export const DocumentDetailsPanel = ({
       <section className="details-section">
         <div className="section-header compact-section-header">
           <h3>Source artifact</h3>
-          <p>Registered placeholder for the original document artifact.</p>
+          <p>Registered source artifact for the selected document.</p>
         </div>
 
         <dl className="details-grid">
@@ -103,11 +179,53 @@ export const DocumentDetailsPanel = ({
             <dt>Status</dt>
             <dd>{formatSourceArtifactStatus(document.sourceArtifact.status)}</dd>
           </div>
+          {document.sourceArtifact.path === undefined ? null : (
+            <div>
+              <dt>Storage path</dt>
+              <dd>
+                <code>{document.sourceArtifact.path}</code>
+              </dd>
+            </div>
+          )}
           <div>
             <dt>Created at</dt>
             <dd>{formatCreatedAt(document.sourceArtifact.createdAt)}</dd>
           </div>
         </dl>
+
+        <form
+          className="upload-form"
+          onSubmit={(event) => void handleUploadSubmit(event)}
+        >
+          <label className="field upload-field">
+            <span>Upload source file</span>
+            <input
+              accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              type="file"
+              onChange={handleFileChange}
+              disabled={uploadState.kind === "submitting"}
+            />
+          </label>
+          <button
+            className="primary-button"
+            type="submit"
+            disabled={uploadState.kind === "submitting"}
+          >
+            {uploadState.kind === "submitting" ? "Uploading..." : "Upload"}
+          </button>
+        </form>
+
+        {uploadState.kind === "success" ? (
+          <p className="status status-loading action-status">
+            {uploadState.message}
+          </p>
+        ) : null}
+
+        {uploadState.kind === "error" ? (
+          <p className="status status-error action-status">
+            Failed to upload source file: {uploadState.message}
+          </p>
+        ) : null}
       </section>
 
       <DocumentActionsPanel
@@ -174,6 +292,13 @@ export const DocumentDetailsPanel = ({
                 >
                   Open details
                 </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => handleDerivedDocumentDownload(derivedDocument.id)}
+                >
+                  Download
+                </button>
               </li>
             ))}
           </ul>
@@ -183,7 +308,7 @@ export const DocumentDetailsPanel = ({
       <section className="details-section">
         <div className="section-header compact-section-header">
           <h3>Document operations</h3>
-          <p>Placeholder operations with document platform and PDF engine boundaries.</p>
+          <p>Current operations across the document platform and external PDF engine boundary.</p>
         </div>
 
         {document.operations.length === 0 ? (
@@ -218,7 +343,7 @@ export const DocumentDetailsPanel = ({
       <section className="details-section">
         <div className="section-header compact-section-header">
           <h3>Metadata</h3>
-          <p>Placeholder metadata for the future document platform.</p>
+          <p>Current metadata known to the document platform.</p>
         </div>
 
         <dl className="details-grid">

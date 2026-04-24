@@ -1,10 +1,10 @@
 export type DocumentKind = "pdf" | "docx"
 
-export type DocumentStatus = "draft" | "ready"
+export type DocumentStatus = "draft" | "uploaded" | "ready"
 
-export type SourceArtifactStorageKind = "local-placeholder"
+export type SourceArtifactStorageKind = "local-placeholder" | "local-file"
 
-export type SourceArtifactStatus = "registered"
+export type SourceArtifactStatus = "registered" | "uploaded"
 
 export type SourceArtifact = {
   id: string
@@ -14,13 +14,14 @@ export type SourceArtifact = {
   storageKind: SourceArtifactStorageKind
   status: SourceArtifactStatus
   createdAt: string
+  path?: string
 }
 
 export type PlatformDocumentActionKind =
   | "extract-metadata"
   | "generate-derived-document"
 
-export type PdfEngineActionKind = "compress-pdf" | "split-pdf"
+export type PdfEngineActionKind = "compress-pdf"
 
 export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKind
 
@@ -68,25 +69,23 @@ export type DerivedDocument = {
   derivationKind: DocumentDerivationKind
 }
 
-export type Document = {
+export type DocumentBase = {
   id: string
   name: string
   kind: DocumentKind
   status: DocumentStatus
   createdAt: string
+}
+
+export type DocumentSummary = DocumentBase
+
+export type DocumentDetails = DocumentBase & {
   origin: DocumentOrigin | null
   sourceArtifact: SourceArtifact
   operations: DocumentOperation[]
   metadata: DocumentMetadata
   derivedDocuments: DerivedDocument[]
 }
-
-export type DocumentSummary = Pick<
-  Document,
-  "id" | "name" | "kind" | "status" | "createdAt"
->
-
-export type DocumentDetails = Document
 
 export type CreateDocumentRequest = {
   name: string
@@ -120,19 +119,19 @@ const isDocumentKind = (value: unknown): value is DocumentKind => {
 }
 
 const isDocumentStatus = (value: unknown): value is DocumentStatus => {
-  return value === "draft" || value === "ready"
+  return value === "draft" || value === "uploaded" || value === "ready"
 }
 
 const isSourceArtifactStorageKind = (
   value: unknown
 ): value is SourceArtifactStorageKind => {
-  return value === "local-placeholder"
+  return value === "local-placeholder" || value === "local-file"
 }
 
 const isSourceArtifactStatus = (
   value: unknown
 ): value is SourceArtifactStatus => {
-  return value === "registered"
+  return value === "registered" || value === "uploaded"
 }
 
 const isDocumentOperationKind = (
@@ -142,8 +141,7 @@ const isDocumentOperationKind = (
     value === "convert-to-pdf" ||
     value === "extract-metadata" ||
     value === "generate-derived-document" ||
-    value === "compress-pdf" ||
-    value === "split-pdf"
+    value === "compress-pdf"
   )
 }
 
@@ -199,6 +197,14 @@ const isSourceArtifact = (value: unknown): value is SourceArtifact => {
     return false
   }
 
+  const hasValidStorageState =
+    (value.storageKind === "local-placeholder" &&
+      value.status === "registered" &&
+      value.path === undefined) ||
+    (value.storageKind === "local-file" &&
+      value.status === "uploaded" &&
+      typeof value.path === "string")
+
   return (
     typeof value.id === "string" &&
     typeof value.documentId === "string" &&
@@ -206,6 +212,7 @@ const isSourceArtifact = (value: unknown): value is SourceArtifact => {
     isDocumentKind(value.kind) &&
     isSourceArtifactStorageKind(value.storageKind) &&
     isSourceArtifactStatus(value.status) &&
+    hasValidStorageState &&
     typeof value.createdAt === "string"
   )
 }
@@ -243,7 +250,7 @@ const isDerivedDocument = (value: unknown): value is DerivedDocument => {
   )
 }
 
-const isDocument = (value: unknown): value is Document => {
+const isDocumentDetails = (value: unknown): value is DocumentDetails => {
   if (!isRecord(value)) {
     return false
   }
@@ -345,7 +352,7 @@ export const loadDocument = async (
 
   const payload: unknown = await response.json()
 
-  if (!isDocument(payload)) {
+  if (!isDocumentDetails(payload)) {
     throw new Error("Document details response has an unexpected shape")
   }
 
@@ -367,7 +374,7 @@ export const createDocument = async (
 
   const payload: unknown = await response.json()
 
-  if (!isDocument(payload)) {
+  if (!isDocumentDetails(payload)) {
     throw new Error("Created document response has an unexpected shape")
   }
 
@@ -393,9 +400,45 @@ export const runDocumentAction = async (
 
   const payload: unknown = await response.json()
 
-  if (!isDocument(payload)) {
+  if (!isDocumentDetails(payload)) {
     throw new Error("Document action response has an unexpected shape")
   }
 
   return payload
+}
+
+export const uploadDocumentSourceFile = async (
+  documentId: string,
+  file: File
+): Promise<DocumentDetails> => {
+  const formData = new FormData()
+
+  formData.append("file", file)
+
+  const response = await fetch(
+    `/api/documents/${encodeURIComponent(documentId)}/upload`,
+    {
+      method: "POST",
+      body: formData
+    }
+  )
+
+  await ensureSuccessfulResponse(response)
+
+  const payload: unknown = await response.json()
+
+  if (!isDocumentDetails(payload)) {
+    throw new Error("Document upload response has an unexpected shape")
+  }
+
+  return payload
+}
+
+export const buildDerivedDocumentDownloadUrl = (
+  documentId: string,
+  derivedDocumentId: string
+): string => {
+  return `/api/documents/${encodeURIComponent(documentId)}/derived/${encodeURIComponent(
+    derivedDocumentId
+  )}/download`
 }

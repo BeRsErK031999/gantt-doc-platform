@@ -97,13 +97,20 @@ const isSourceArtifact = (value: unknown): value is SourceArtifact => {
     return false
   }
 
+  const hasValidStorageState =
+    (value.storageKind === "local-placeholder" &&
+      value.status === "registered" &&
+      value.path === undefined) ||
+    (value.storageKind === "local-file" &&
+      value.status === "uploaded" &&
+      typeof value.path === "string")
+
   return (
     typeof value.id === "string" &&
     typeof value.documentId === "string" &&
     typeof value.fileName === "string" &&
     isDocumentKind(value.kind) &&
-    value.storageKind === "local-placeholder" &&
-    value.status === "registered" &&
+    hasValidStorageState &&
     typeof value.createdAt === "string"
   )
 }
@@ -179,7 +186,9 @@ const isDocument = (value: unknown): value is Document => {
     typeof value.id === "string" &&
     typeof value.name === "string" &&
     isDocumentKind(value.kind) &&
-    (value.status === "draft" || value.status === "ready") &&
+    (value.status === "draft" ||
+      value.status === "uploaded" ||
+      value.status === "ready") &&
     typeof value.createdAt === "string" &&
     isDocumentOrigin(value.origin) &&
     isSourceArtifact(sourceArtifact) &&
@@ -202,7 +211,9 @@ const isLegacyDocument = (value: unknown): value is LegacyDocument => {
     typeof value.id === "string" &&
     typeof value.name === "string" &&
     isDocumentKind(value.kind) &&
-    (value.status === "draft" || value.status === "ready") &&
+    (value.status === "draft" ||
+      value.status === "uploaded" ||
+      value.status === "ready") &&
     typeof value.createdAt === "string" &&
     Array.isArray(value.operations) &&
     value.operations.every((operation) => isDocumentOperation(operation)) &&

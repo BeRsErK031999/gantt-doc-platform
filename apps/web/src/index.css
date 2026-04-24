@@ -100,6 +100,14 @@ body {
   align-items: end;
 }
 
+.upload-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+  margin-top: 16px;
+}
+
 .field {
   display: grid;
   gap: 8px;
@@ -118,6 +126,12 @@ body {
   background: #fff;
   color: inherit;
   font: inherit;
+}
+
+.field input[type="file"] {
+  height: auto;
+  min-height: 44px;
+  padding: 9px 14px;
 }
 
 .field input:focus,
@@ -433,6 +447,10 @@ body {
   }
 
   .document-form {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-form {
     grid-template-columns: 1fr;
   }
 

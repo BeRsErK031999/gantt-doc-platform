@@ -31,6 +31,8 @@ export const formatDocumentStatus = (value: DocumentStatus): string => {
   switch (value) {
     case "draft":
       return "Draft"
+    case "uploaded":
+      return "Uploaded"
     case "ready":
       return "Ready"
   }
@@ -42,6 +44,8 @@ export const formatSourceArtifactStorageKind = (
   switch (value) {
     case "local-placeholder":
       return "Local placeholder"
+    case "local-file":
+      return "Local file"
   }
 }
 
@@ -51,6 +55,8 @@ export const formatSourceArtifactStatus = (
   switch (value) {
     case "registered":
       return "Registered"
+    case "uploaded":
+      return "Uploaded"
   }
 }
 
@@ -64,8 +70,6 @@ export const formatOperationKind = (value: DocumentOperation["kind"]): string =>
       return "Generate derived document"
     case "compress-pdf":
       return "Compress PDF"
-    case "split-pdf":
-      return "Split PDF"
   }
 }
 
@@ -74,7 +78,6 @@ export const formatOperationBoundary = (
 ): string => {
   switch (value) {
     case "compress-pdf":
-    case "split-pdf":
       return "PDF engine"
     case "convert-to-pdf":
     case "extract-metadata":
@@ -101,9 +104,9 @@ export const formatDerivationKind = (value: DocumentDerivationKind): string => {
     case "document-summary":
       return "Document summary"
     case "compressed-pdf":
-      return "Compressed PDF placeholder"
+      return "Compressed PDF"
     case "split-pdf-set":
-      return "Split PDF placeholder"
+      return "Split PDF set"
   }
 }
 

@@ -275,9 +275,9 @@ export const App = () => {
           <p className="eyebrow">Document platform</p>
           <h1 className="title">Documents</h1>
           <p className="description">
-            This slice keeps documents in memory and now covers list, creation,
-            and a lightweight details flow with placeholder metadata and derived
-            documents.
+            This slice keeps local document records, source artifacts, and
+            derived documents, and now delegates PDF compression to an external
+            PDF engine.
           </p>
         </div>
 
@@ -338,7 +338,8 @@ export const App = () => {
             <h2>Documents workspace</h2>
             <p>
               Open a document from the list to inspect overview, operations,
-              metadata, and derived document placeholders.
+              metadata, and derived documents produced by the current action
+              flow.
             </p>
           </div>
 

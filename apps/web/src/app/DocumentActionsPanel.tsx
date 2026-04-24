@@ -4,7 +4,6 @@ import { runDocumentAction } from "./documents-api"
 import type {
   DocumentActionKind,
   DocumentDetails,
-  PdfEngineActionKind,
   PlatformDocumentActionKind
 } from "./documents-api"
 
@@ -38,20 +37,13 @@ const PLATFORM_ACTIONS: Array<
   }
 ]
 
-const PDF_ENGINE_ACTIONS: Array<
-  ActionDefinition & { kind: PdfEngineActionKind }
-> = [
+const PDF_ENGINE_ACTIONS: ActionDefinition[] = [
   {
     kind: "compress-pdf",
     label: "Compress PDF",
-    description: "Submit a local PDF engine placeholder for this document.",
-    successMessage: "PDF compression placeholder submitted."
-  },
-  {
-    kind: "split-pdf",
-    label: "Split PDF",
-    description: "Submit a local PDF split placeholder for this document.",
-    successMessage: "PDF split placeholder submitted."
+    description:
+      "Send the uploaded PDF to the external PDF engine and save the compressed result locally.",
+    successMessage: "Compressed PDF saved as a derived document."
   }
 ]
 
@@ -100,7 +92,7 @@ export const DocumentActionsPanel = ({
     <section className="details-section">
       <div className="section-header compact-section-header">
         <h3>Document actions</h3>
-        <p>Run placeholder actions through the current document action flow.</p>
+        <p>Run the current document action flow for local and external operations.</p>
       </div>
 
       <h4 className="actions-group-title">Platform actions</h4>
@@ -137,7 +129,7 @@ export const DocumentActionsPanel = ({
             <small>{action.description}</small>
             {actionState.kind === "submitting" &&
             actionState.actionKind === action.kind ? (
-              <strong>Submitting...</strong>
+              <strong>Running...</strong>
             ) : null}
           </button>
         ))}

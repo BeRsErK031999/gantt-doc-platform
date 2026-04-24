@@ -1,10 +1,10 @@
 export type DocumentKind = "pdf" | "docx"
 
-export type DocumentStatus = "draft" | "ready"
+export type DocumentStatus = "draft" | "uploaded" | "ready"
 
-export type SourceArtifactStorageKind = "local-placeholder"
+export type SourceArtifactStorageKind = "local-placeholder" | "local-file"
 
-export type SourceArtifactStatus = "registered"
+export type SourceArtifactStatus = "registered" | "uploaded"
 
 export type SourceArtifact = {
   id: string
@@ -14,13 +14,14 @@ export type SourceArtifact = {
   storageKind: SourceArtifactStorageKind
   status: SourceArtifactStatus
   createdAt: string
+  path?: string
 }
 
 export type PlatformDocumentActionKind =
   | "extract-metadata"
   | "generate-derived-document"
 
-export type PdfEngineActionKind = "compress-pdf" | "split-pdf"
+export type PdfEngineActionKind = "compress-pdf"
 
 export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKind
 
@@ -68,12 +69,15 @@ export type DerivedDocument = {
   derivationKind: DocumentDerivationKind
 }
 
-export type Document = {
+export type DocumentBase = {
   id: string
   name: string
   kind: DocumentKind
   status: DocumentStatus
   createdAt: string
+}
+
+export type Document = DocumentBase & {
   origin: DocumentOrigin | null
   sourceArtifact: SourceArtifact
   operations: DocumentOperation[]
@@ -81,16 +85,27 @@ export type Document = {
   derivedDocuments: DerivedDocument[]
 }
 
-export type DocumentSummary = Pick<
-  Document,
-  "id" | "name" | "kind" | "status" | "createdAt"
->
+export type DocumentSummary = DocumentBase
 
-export type DocumentDetails = Document
+export type DocumentDetails = DocumentBase & {
+  origin: DocumentOrigin | null
+  sourceArtifact: SourceArtifact
+  operations: DocumentOperation[]
+  metadata: DocumentMetadata
+  derivedDocuments: DerivedDocument[]
+}
 
 export type CreateDocumentInput = {
   name: string
   kind: DocumentKind
+}
+
+export type UploadedDocumentSource = {
+  fileName: string
+  kind: DocumentKind
+  mimeType: string
+  path: string
+  sizeBytes: number
 }
 
 export const isDocumentKind = (value: unknown): value is DocumentKind => {
@@ -106,7 +121,7 @@ export const isPlatformDocumentActionKind = (
 export const isPdfEngineActionKind = (
   value: unknown
 ): value is PdfEngineActionKind => {
-  return value === "compress-pdf" || value === "split-pdf"
+  return value === "compress-pdf"
 }
 
 export const isDocumentActionKind = (
@@ -121,7 +136,6 @@ export const isPdfEngineActionSupportedForDocument = (
 ): boolean => {
   switch (actionKind) {
     case "compress-pdf":
-    case "split-pdf":
       return documentKind === "pdf"
   }
 }
@@ -155,6 +169,32 @@ const DOCUMENT_EXTENSIONS: Record<DocumentKind, string> = {
 const DOCUMENT_MIME_TYPES: Record<DocumentKind, string> = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+}
+
+export const resolveDocumentKindFromSourceFile = ({
+  fileName,
+  mimeType
+}: {
+  fileName: string
+  mimeType: string
+}): DocumentKind | null => {
+  const normalizedFileName = fileName.trim().toLowerCase()
+
+  if (
+    normalizedFileName.endsWith(".pdf") &&
+    mimeType === DOCUMENT_MIME_TYPES.pdf
+  ) {
+    return "pdf"
+  }
+
+  if (
+    normalizedFileName.endsWith(".docx") &&
+    mimeType === DOCUMENT_MIME_TYPES.docx
+  ) {
+    return "docx"
+  }
+
+  return null
 }
 
 const normalizeFileNameStem = (value: string): string => {
@@ -210,6 +250,32 @@ export const buildSourceArtifact = (
     storageKind: "local-placeholder",
     status: "registered",
     createdAt
+  }
+}
+
+export const attachUploadedDocumentSource = (
+  document: Document,
+  source: UploadedDocumentSource
+): Document => {
+  return {
+    ...document,
+    status: "uploaded",
+    sourceArtifact: {
+      ...document.sourceArtifact,
+      fileName: source.fileName,
+      kind: source.kind,
+      storageKind: "local-file",
+      status: "uploaded",
+      path: source.path
+    },
+    metadata: {
+      ...document.metadata,
+      sourceFileName: source.fileName,
+      mimeType: source.mimeType,
+      sizeBytes: source.sizeBytes,
+      pageCount: null,
+      wordCount: null
+    }
   }
 }
 
