@@ -25,15 +25,16 @@ export type PdfEngineActionKind = "compress-pdf" | "split-pdf"
 
 export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKind
 
-export type DocumentOperationKind = "convert-to-pdf" | DocumentActionKind
-
-export type DocumentOperationStatus = "planned" | "completed"
+export type DocumentOperationStatus = "completed" | "failed"
 
 export type DocumentOperation = {
   id: string
-  documentId: string
-  kind: DocumentOperationKind
+  kind: PdfEngineActionKind
   status: DocumentOperationStatus
+  createdAt: string
+  finishedAt: string | null
+  errorCode?: string
+  errorMessage?: string
 }
 
 export type DocumentMetadata = {
@@ -147,20 +148,14 @@ const isSourceArtifactStatus = (
 
 const isDocumentOperationKind = (
   value: unknown
-): value is DocumentOperationKind => {
-  return (
-    value === "convert-to-pdf" ||
-    value === "extract-metadata" ||
-    value === "generate-derived-document" ||
-    value === "compress-pdf" ||
-    value === "split-pdf"
-  )
+): value is PdfEngineActionKind => {
+  return value === "compress-pdf" || value === "split-pdf"
 }
 
 const isDocumentOperationStatus = (
   value: unknown
 ): value is DocumentOperationStatus => {
-  return value === "planned" || value === "completed"
+  return value === "completed" || value === "failed"
 }
 
 const isDocumentDerivationKind = (
@@ -181,9 +176,12 @@ const isDocumentOperation = (value: unknown): value is DocumentOperation => {
 
   return (
     typeof value.id === "string" &&
-    typeof value.documentId === "string" &&
     isDocumentOperationKind(value.kind) &&
-    isDocumentOperationStatus(value.status)
+    isDocumentOperationStatus(value.status) &&
+    typeof value.createdAt === "string" &&
+    (typeof value.finishedAt === "string" || value.finishedAt === null) &&
+    (typeof value.errorCode === "string" || value.errorCode === undefined) &&
+    (typeof value.errorMessage === "string" || value.errorMessage === undefined)
   )
 }
 

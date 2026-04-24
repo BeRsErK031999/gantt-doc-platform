@@ -25,15 +25,16 @@ export type PdfEngineActionKind = "compress-pdf" | "split-pdf"
 
 export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKind
 
-export type DocumentOperationKind = "convert-to-pdf" | DocumentActionKind
-
-export type DocumentOperationStatus = "planned" | "completed"
+export type DocumentOperationStatus = "completed" | "failed"
 
 export type DocumentOperation = {
   id: string
-  documentId: string
-  kind: DocumentOperationKind
+  kind: PdfEngineActionKind
   status: DocumentOperationStatus
+  createdAt: string
+  finishedAt: string | null
+  errorCode?: string
+  errorMessage?: string
 }
 
 export type DocumentMetadata = {
@@ -139,31 +140,6 @@ export const isPdfEngineActionSupportedForDocument = (
     case "split-pdf":
       return documentKind === "pdf"
   }
-}
-
-export const buildPlannedOperations = (
-  documentId: string,
-  documentKind: DocumentKind
-): DocumentOperation[] => {
-  const baseOperations: DocumentOperationKind[] = [
-    "extract-metadata",
-    "generate-derived-document"
-  ]
-
-  if (documentKind === "docx") {
-    baseOperations.unshift("convert-to-pdf")
-  }
-
-  if (documentKind === "pdf") {
-    baseOperations.push("compress-pdf", "split-pdf")
-  }
-
-  return baseOperations.map((kind, index) => ({
-    id: `${documentId}-operation-${index + 1}`,
-    documentId,
-    kind,
-    status: "planned"
-  }))
 }
 
 const DOCUMENT_EXTENSIONS: Record<DocumentKind, string> = {

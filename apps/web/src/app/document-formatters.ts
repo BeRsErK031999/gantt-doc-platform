@@ -66,12 +66,6 @@ export const formatSourceArtifactStatus = (
 
 export const formatOperationKind = (value: DocumentOperation["kind"]): string => {
   switch (value) {
-    case "convert-to-pdf":
-      return "Convert to PDF"
-    case "extract-metadata":
-      return "Extract metadata"
-    case "generate-derived-document":
-      return "Generate derived document"
     case "compress-pdf":
       return "Compress PDF"
     case "split-pdf":
@@ -86,10 +80,6 @@ export const formatOperationBoundary = (
     case "compress-pdf":
     case "split-pdf":
       return "PDF engine"
-    case "convert-to-pdf":
-    case "extract-metadata":
-    case "generate-derived-document":
-      return "Document platform"
   }
 }
 
@@ -97,11 +87,19 @@ export const formatOperationStatus = (
   value: DocumentOperation["status"]
 ): string => {
   switch (value) {
-    case "planned":
-      return "Planned"
     case "completed":
       return "Completed"
+    case "failed":
+      return "Failed"
   }
+}
+
+export const formatFinishedAt = (value: string | null): string => {
+  if (value === null) {
+    return "Not finished"
+  }
+
+  return formatCreatedAt(value)
 }
 
 export const formatDerivationKind = (value: DocumentDerivationKind): string => {

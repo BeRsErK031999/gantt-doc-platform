@@ -1,13 +1,9 @@
 import { randomUUID } from "node:crypto"
 
-import {
-  applyDocumentAction,
-  applyPdfEngineActionPlaceholder
-} from "./document-actions.js"
+import { applyDocumentAction } from "./document-actions.js"
 import {
   attachUploadedDocumentSource,
   buildDocumentMetadata,
-  buildPlannedOperations,
   buildSourceArtifact,
   isPdfEngineActionSupportedForDocument,
   isPlatformDocumentActionKind,
@@ -21,9 +17,10 @@ import type {
   DocumentDerivationKind,
   DocumentDetails,
   DocumentKind,
+  DocumentOperation,
   DocumentSummary
 } from "./document.js"
-import type { DocumentActionKind } from "./document.js"
+import type { DocumentActionKind, PdfEngineActionKind } from "./document.js"
 import type { DocumentsStore } from "./documents-store.js"
 import type { LocalDocumentFileStorage } from "./local-file-storage.js"
 import type { PdfEngineGateway } from "../pdf-engine/pdf-engine-gateway.js"
@@ -105,6 +102,48 @@ const createActionError = ({
     message,
     details,
     statusCode
+  }
+}
+
+const buildDocumentOperation = (
+  actionKind: PdfEngineActionKind
+): DocumentOperation => {
+  return {
+    id: randomUUID(),
+    kind: actionKind,
+    status: "completed",
+    createdAt: new Date().toISOString(),
+    finishedAt: null
+  }
+}
+
+const finalizeDocumentOperation = ({
+  operation,
+  errorCode,
+  errorMessage,
+  status
+}: {
+  operation: DocumentOperation
+  errorCode?: string
+  errorMessage?: string
+  status: DocumentOperation["status"]
+}): DocumentOperation => {
+  return {
+    ...operation,
+    status,
+    finishedAt: new Date().toISOString(),
+    errorCode,
+    errorMessage
+  }
+}
+
+const prependDocumentOperation = (
+  document: Document,
+  operation: DocumentOperation
+): Document => {
+  return {
+    ...document,
+    operations: [operation, ...document.operations]
   }
 }
 
@@ -223,7 +262,7 @@ const buildDerivedDocument = ({
       documentKind,
       createdAt
     ),
-    operations: buildPlannedOperations(documentId, documentKind),
+    operations: [],
     metadata: buildDocumentMetadata(documentName, documentKind),
     derivedDocuments: []
   }
@@ -329,7 +368,7 @@ export const createDocumentsService = (
           input.kind,
           createdAt
         ),
-        operations: buildPlannedOperations(documentId, input.kind),
+        operations: [],
         metadata: buildDocumentMetadata(documentName, input.kind),
         derivedDocuments: []
       }
@@ -477,47 +516,74 @@ export const createDocumentsService = (
         }
       }
 
+      const operation = buildDocumentOperation(actionKind)
+      const storeFailedOperation = (
+        errorResult: Extract<RunDocumentActionResult, { kind: "error" }>
+      ): Extract<RunDocumentActionResult, { kind: "error" }> => {
+        store.updateDocument(
+          prependDocumentOperation(
+            document,
+            finalizeDocumentOperation({
+              operation,
+              errorCode: errorResult.code,
+              errorMessage: errorResult.message,
+              status: "failed"
+            })
+          )
+        )
+
+        return errorResult
+      }
+
       if (!isPdfEngineActionSupportedForDocument(document.kind, actionKind)) {
-        return createActionError({
-          code: "PDF_ACTION_UNSUPPORTED_DOCUMENT_KIND",
-          message: "PDF engine actions are only supported for PDF documents.",
-          statusCode: 400
-        })
+        return storeFailedOperation(
+          createActionError({
+            code: "PDF_ACTION_UNSUPPORTED_DOCUMENT_KIND",
+            message: "PDF engine actions are only supported for PDF documents.",
+            statusCode: 400
+          })
+        )
       }
 
       if (document.sourceArtifact.status !== "uploaded") {
-        return createActionError({
-          code: "SOURCE_FILE_NOT_UPLOADED",
-          message:
-            actionKind === "split-pdf"
-              ? "Source file is not uploaded yet. Upload a local PDF file before running split-pdf."
-              : "Source file is not uploaded yet. Upload a local PDF file before running compress-pdf.",
-          statusCode: 400
-        })
+        return storeFailedOperation(
+          createActionError({
+            code: "SOURCE_FILE_NOT_UPLOADED",
+            message:
+              actionKind === "split-pdf"
+                ? "Source file is not uploaded yet. Upload a local PDF file before running split-pdf."
+                : "Source file is not uploaded yet. Upload a local PDF file before running compress-pdf.",
+            statusCode: 400
+          })
+        )
       }
 
       if (
         document.sourceArtifact.storageKind !== "local-file" ||
         document.sourceArtifact.path === undefined
       ) {
-        return createActionError({
-          code: "SOURCE_FILE_STORAGE_UNAVAILABLE",
-          message:
-            "Source artifact is not backed by a local file path and cannot be sent to the PDF engine.",
-          statusCode: 400
-        })
+        return storeFailedOperation(
+          createActionError({
+            code: "SOURCE_FILE_STORAGE_UNAVAILABLE",
+            message:
+              "Source artifact is not backed by a local file path and cannot be sent to the PDF engine.",
+            statusCode: 400
+          })
+        )
       }
 
       const sourceFilePath = document.sourceArtifact.path
 
       if (!(await localFileStorage.storagePathExists(sourceFilePath))) {
-        return createActionError({
-          code: "SOURCE_FILE_MISSING",
-          details: `Missing storage path: ${sourceFilePath}`,
-          message:
-            "Uploaded source PDF could not be found in local storage.",
-          statusCode: 400
-        })
+        return storeFailedOperation(
+          createActionError({
+            code: "SOURCE_FILE_MISSING",
+            details: `Missing storage path: ${sourceFilePath}`,
+            message:
+              "Uploaded source PDF could not be found in local storage.",
+            statusCode: 400
+          })
+        )
       }
 
       let absoluteSourceFilePath: string
@@ -529,12 +595,14 @@ export const createDocumentsService = (
         const message =
           error instanceof Error ? error.message : "Unknown storage path error."
 
-        return createActionError({
-          code: "SOURCE_FILE_PATH_INVALID",
-          details: message,
-          message: "Source file path is invalid and cannot be resolved.",
-          statusCode: 400
-        })
+        return storeFailedOperation(
+          createActionError({
+            code: "SOURCE_FILE_PATH_INVALID",
+            details: message,
+            message: "Source file path is invalid and cannot be resolved.",
+            statusCode: 400
+          })
+        )
       }
 
       const pdfEngineResult = await pdfEngineGateway.submitPdfAction({
@@ -547,12 +615,9 @@ export const createDocumentsService = (
       })
 
       if (pdfEngineResult.kind === "error") {
-        return pdfEngineResult
+        return storeFailedOperation(pdfEngineResult)
       }
 
-      const updatedDocument = store.updateDocument(
-        applyPdfEngineActionPlaceholder(document, actionKind)
-      )
       const derivedDocumentId = randomUUID()
       let savedDerivedFilePath: string
 
@@ -569,16 +634,28 @@ export const createDocumentsService = (
         const message =
           error instanceof Error ? error.message : "Unknown local storage error."
 
-        return createActionError({
-          code: "LOCAL_DERIVED_FILE_SAVE_FAILED",
-          details: message,
-          message:
-            actionKind === "split-pdf"
-              ? "Split PDF result was created but could not be saved locally."
-              : "Compressed PDF was created but could not be saved locally.",
-          statusCode: 500
-        })
+        return storeFailedOperation(
+          createActionError({
+            code: "LOCAL_DERIVED_FILE_SAVE_FAILED",
+            details: message,
+            message:
+              actionKind === "split-pdf"
+                ? "Split PDF result was created but could not be saved locally."
+                : "Compressed PDF was created but could not be saved locally.",
+            statusCode: 500
+          })
+        )
       }
+
+      const updatedDocument = store.updateDocument(
+        prependDocumentOperation(
+          document,
+          finalizeDocumentOperation({
+            operation,
+            status: "completed"
+          })
+        )
+      )
 
       store.createDocument(
         buildPdfEngineDerivedDocument({

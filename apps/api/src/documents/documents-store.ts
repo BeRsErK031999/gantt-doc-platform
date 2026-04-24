@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url"
 import {
   buildDocumentMetadata,
   buildSourceArtifact,
-  isDocumentActionKind,
   isDocumentKind,
+  isPdfEngineActionKind,
   resolveDocumentKindForDerivation
 } from "./document.js"
 import type { Document } from "./document.js"
@@ -16,7 +16,6 @@ import type {
   DocumentMetadata,
   DocumentOrigin,
   DocumentOperation,
-  DocumentOperationKind,
   DocumentOperationStatus,
   SourceArtifact
 } from "./document.js"
@@ -46,6 +45,17 @@ type LegacyDocument = Omit<Document, "origin" | "sourceArtifact" | "derivedDocum
   derivedDocuments: LegacyDerivedDocument[]
 }
 
+type LegacyDocumentOperation = {
+  id: string
+  documentId: string
+  kind: string
+  status: string
+}
+
+type BackwardCompatibleDocument = Omit<Document, "operations"> & {
+  operations?: unknown
+}
+
 const DOCUMENTS_STORAGE_FILE_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../../data/documents.json"
@@ -55,16 +65,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-const isDocumentOperationKind = (
-  value: unknown
-): value is DocumentOperationKind => {
-  return value === "convert-to-pdf" || isDocumentActionKind(value)
-}
-
 const isDocumentOperationStatus = (
   value: unknown
 ): value is DocumentOperationStatus => {
-  return value === "planned" || value === "completed"
+  return value === "completed" || value === "failed"
 }
 
 const isDocumentOperation = (value: unknown): value is DocumentOperation => {
@@ -74,9 +78,27 @@ const isDocumentOperation = (value: unknown): value is DocumentOperation => {
 
   return (
     typeof value.id === "string" &&
+    isPdfEngineActionKind(value.kind) &&
+    isDocumentOperationStatus(value.status) &&
+    typeof value.createdAt === "string" &&
+    (typeof value.finishedAt === "string" || value.finishedAt === null) &&
+    (typeof value.errorCode === "string" || value.errorCode === undefined) &&
+    (typeof value.errorMessage === "string" || value.errorMessage === undefined)
+  )
+}
+
+const isLegacyDocumentOperation = (
+  value: unknown
+): value is LegacyDocumentOperation => {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.id === "string" &&
     typeof value.documentId === "string" &&
-    isDocumentOperationKind(value.kind) &&
-    isDocumentOperationStatus(value.status)
+    typeof value.kind === "string" &&
+    typeof value.status === "string"
   )
 }
 
@@ -211,6 +233,43 @@ const isDocument = (value: unknown): value is Document => {
   )
 }
 
+const isBackwardCompatibleDocument = (
+  value: unknown
+): value is BackwardCompatibleDocument => {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const { sourceArtifact } = value
+
+  const hasCompatibleOperations =
+    value.operations === undefined ||
+    (Array.isArray(value.operations) &&
+      value.operations.every((operation) => {
+        return (
+          isDocumentOperation(operation) || isLegacyDocumentOperation(operation)
+        )
+      }))
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    isDocumentKind(value.kind) &&
+    (value.status === "draft" ||
+      value.status === "uploaded" ||
+      value.status === "ready") &&
+    typeof value.createdAt === "string" &&
+    isDocumentOrigin(value.origin) &&
+    isSourceArtifact(sourceArtifact) &&
+    sourceArtifact.documentId === value.id &&
+    sourceArtifact.kind === value.kind &&
+    hasCompatibleOperations &&
+    isDocumentMetadata(value.metadata) &&
+    Array.isArray(value.derivedDocuments) &&
+    value.derivedDocuments.every((document) => isDerivedDocument(document))
+  )
+}
+
 const isLegacyDocument = (value: unknown): value is LegacyDocument => {
   if (!isRecord(value)) {
     return false
@@ -225,7 +284,7 @@ const isLegacyDocument = (value: unknown): value is LegacyDocument => {
       value.status === "ready") &&
     typeof value.createdAt === "string" &&
     Array.isArray(value.operations) &&
-    value.operations.every((operation) => isDocumentOperation(operation)) &&
+    value.operations.every((operation) => isLegacyDocumentOperation(operation)) &&
     isDocumentMetadata(value.metadata) &&
     Array.isArray(value.derivedDocuments) &&
     value.derivedDocuments.every((document) => isLegacyDerivedDocument(document))
@@ -310,6 +369,29 @@ const parseDocumentsStoragePayload = (value: unknown): Document[] | null => {
                   document.origin.derivationKind
                 )
               },
+        derivedDocuments: []
+      })
+      continue
+    }
+
+    if (isBackwardCompatibleDocument(document)) {
+      documents.push({
+        ...document,
+        origin:
+          document.origin === null
+            ? null
+            : {
+                ...document.origin,
+                derivationKind: normalizeDocumentDerivationKind(
+                  document.origin.derivationKind
+                )
+              },
+        operations:
+          document.operations !== undefined &&
+          Array.isArray(document.operations) &&
+          document.operations.every((operation) => isDocumentOperation(operation))
+            ? document.operations
+            : [],
         derivedDocuments: []
       })
       continue

@@ -12,6 +12,7 @@ import {
   formatDerivationKind,
   formatDocumentKind,
   formatDocumentStatus,
+  formatFinishedAt,
   formatOperationBoundary,
   formatOperationKind,
   formatOperationStatus,
@@ -307,19 +308,24 @@ export const DocumentDetailsPanel = ({
 
       <section className="details-section">
         <div className="section-header compact-section-header">
-          <h3>Document operations</h3>
-          <p>Current operations across the document platform and external PDF engine boundary.</p>
+          <h3>Operations history</h3>
+          <p>Recorded PDF engine actions for this document, newest first.</p>
         </div>
 
         {document.operations.length === 0 ? (
           <div className="empty-state section-empty-state">
-            <h4>No planned operations</h4>
-            <p>This document does not have operation placeholders yet.</p>
+            <h4>No operations yet</h4>
+            <p>No PDF operation history has been recorded for this document.</p>
           </div>
         ) : (
           <ul className="details-list">
             {document.operations.map((operation) => (
-              <li className="details-list-item" key={operation.id}>
+              <li
+                className={`details-list-item${
+                  operation.status === "failed" ? " details-list-item-error" : ""
+                }`}
+                key={operation.id}
+              >
                 <div>
                   <p className="details-list-title">
                     {formatOperationKind(operation.kind)}
@@ -330,8 +336,23 @@ export const DocumentDetailsPanel = ({
                   <p className="details-list-meta">
                     Boundary: {formatOperationBoundary(operation.kind)}
                   </p>
+                  <p className="details-list-meta">
+                    Created: {formatCreatedAt(operation.createdAt)}
+                  </p>
+                  <p className="details-list-meta">
+                    Finished: {formatFinishedAt(operation.finishedAt)}
+                  </p>
+                  {operation.errorMessage === undefined ? null : (
+                    <p className="details-list-meta details-list-error">
+                      Error: {operation.errorMessage}
+                    </p>
+                  )}
                 </div>
-                <span className="details-badge">
+                <span
+                  className={`details-badge${
+                    operation.status === "failed" ? " details-badge-error" : ""
+                  }`}
+                >
                   {formatOperationStatus(operation.status)}
                 </span>
               </li>

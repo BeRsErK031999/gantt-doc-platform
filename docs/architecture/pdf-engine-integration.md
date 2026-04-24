@@ -17,6 +17,13 @@ The current integration supports two PDF engine operations:
 
 No other PDF engine action should be treated as currently supported by `gantt-doc-platform`.
 
+Operational constraints for the current milestone:
+
+- `split-pdf` requires a non-empty `pageRanges` value before the request can be sent to `gantt-pdf-platform`;
+- `compress-pdf` does not accept or require `pageRanges`;
+- `zip` is a derived document result kind, not a creatable source document kind for `POST /documents`;
+- `zip` cannot be used as the source document kind for `compress-pdf` or `split-pdf`.
+
 ## Environment Configuration
 
 The API integration depends on two environment variables:
@@ -69,6 +76,32 @@ The split result is not fixed to one artifact type. The engine may return:
 
 The document platform preserves the returned file name and media type when saving the derived artifact locally.
 
+## Local Storage Paths
+
+`gantt-doc-platform` stores runtime files under local ignored storage paths:
+
+- source upload: `storage/documents/<documentId>/original.pdf`
+- compressed result: `storage/documents/<sourceDocumentId>/derived/<derivedDocumentId>/<engineFileName>`
+- split result: `storage/documents/<sourceDocumentId>/derived/<derivedDocumentId>/<engineFileName>`
+
+The stored derived file name is the downloaded engine file name when available from `content-disposition`, otherwise a local fallback name is used.
+
+The stored derived media type is preserved in document metadata and reused later by the download endpoint.
+
+## Download Behavior
+
+Derived artifacts are downloaded from:
+
+- `GET /documents/:id/derived/:derivedId/download`
+
+Current behavior:
+
+- the API reads the saved local artifact referenced by the derived document;
+- `Content-Disposition` uses the stored file name;
+- `Content-Type` uses the stored media type;
+- split results may download as PDF or ZIP depending on the engine output;
+- the API must not recompute file name or media type during download when the stored values are already present.
+
 ## Error Response Shape
 
 `compress-pdf` failures are returned as structured API errors.
@@ -90,6 +123,12 @@ Example shape:
 ```
 
 The backend must not return raw stack traces to the user in this contract.
+
+The current milestone relies on this contract in three places:
+
+- immediate API responses from `POST /documents/:id/actions`;
+- operation history entries stored on the source document;
+- local troubleshooting through runbooks and browser error UX.
 
 ## User-Facing Messages And Technical Diagnostics
 
@@ -213,6 +252,12 @@ If `gantt-pdf-platform` is down, unreachable, or otherwise unavailable, the gate
 ### Result download failed
 
 If the PDF engine finishes processing but the result artifact cannot be downloaded, the document platform must report that failure instead of pretending the operation succeeded.
+
+### Split page ranges missing or invalid
+
+If `split-pdf` is called without a non-empty `pageRanges` value, `gantt-doc-platform` must reject the request before it reaches the PDF engine.
+
+If `pageRanges` is syntactically acceptable for the route but rejected by `gantt-pdf-platform`, the API should surface that failure through the stable PDF engine error contract rather than masking it with a generic server error.
 
 ### Invalid split result
 
