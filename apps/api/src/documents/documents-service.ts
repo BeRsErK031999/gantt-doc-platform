@@ -17,6 +17,7 @@ import type {
   DocumentDerivationKind,
   DocumentDetails,
   DocumentKind,
+  DocumentOperationInput,
   DocumentOperation,
   DocumentSummary,
   MergePdfActionInput,
@@ -114,11 +115,12 @@ const createActionError = ({
 }
 
 const buildDocumentOperation = (
-  actionKind: PdfEngineActionKind
+  input: DocumentOperationInput
 ): DocumentOperation => {
   return {
     id: randomUUID(),
-    kind: actionKind,
+    kind: input.kind,
+    input,
     status: "completed",
     createdAt: new Date().toISOString(),
     finishedAt: null
@@ -529,6 +531,30 @@ const getMergePageNumberingMode = (
   return input.pageNumberingMode ?? "none"
 }
 
+const toDocumentOperationInput = (
+  input: RunDocumentActionInput
+): DocumentOperationInput => {
+  if (input.kind === "split-pdf") {
+    return {
+      kind: "split-pdf",
+      pageRanges: input.pageRanges
+    }
+  }
+
+  if (input.kind === "merge-pdf") {
+    return {
+      kind: "merge-pdf",
+      sourceDocumentIds: input.sourceDocumentIds,
+      excludePageRanges: input.excludePageRanges,
+      pageNumberingMode: input.pageNumberingMode
+    }
+  }
+
+  return {
+    kind: "compress-pdf"
+  }
+}
+
 export const createDocumentsService = (
   store: DocumentsStore,
   pdfEngineGateway: PdfEngineGateway,
@@ -712,7 +738,7 @@ export const createDocumentsService = (
         }
       }
 
-      const operation = buildDocumentOperation(actionKind)
+      const operation = buildDocumentOperation(toDocumentOperationInput(input))
       const storeFailedOperation = (
         errorResult: Extract<RunDocumentActionResult, { kind: "error" }>
       ): Extract<RunDocumentActionResult, { kind: "error" }> => {

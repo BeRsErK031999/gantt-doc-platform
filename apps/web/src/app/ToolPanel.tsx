@@ -13,6 +13,7 @@ import type {
   DocumentDetails,
   RunDocumentActionRequest
 } from "./documents-api"
+import { formatOperationErrorMessage } from "./document-formatters"
 
 export type ActiveTool = "compress" | "split" | "merge"
 
@@ -30,7 +31,6 @@ type ActionState =
       kind: "error"
       code?: string
       message: string
-      technicalDetails?: string
     }
 
 type UploadedMergeSource = {
@@ -63,7 +63,7 @@ const TOOL_CONTENT: Record<
       "Upload a PDF, create a document automatically, then run the existing compression action.",
     resultDescription:
       "The backend creates a derived compressed PDF and keeps operation history on the source document.",
-    successMessage: "Compressed PDF is ready to download."
+    successMessage: "Compressed PDF is ready."
   },
   split: {
     title: "Split PDF",
@@ -74,7 +74,7 @@ const TOOL_CONTENT: Record<
       "Upload a PDF, create a document automatically, then run the existing split action with page ranges.",
     resultDescription:
       "The backend creates a derived split result and keeps operation history on the source document.",
-    successMessage: "Split result is ready to download."
+    successMessage: "Split result is ready."
   },
   merge: {
     title: "Merge PDF",
@@ -82,10 +82,10 @@ const TOOL_CONTENT: Record<
     pendingActionLabel: "Merging...",
     uploadLabel: "Upload files",
     description:
-      "Choose multiple PDFs, create documents for each upload, then merge them through the external PDF engine.",
+      "Choose multiple PDFs, reorder them, remove extras, then merge them through the external PDF engine.",
     resultDescription:
       "The first uploaded PDF becomes the root document, additional PDFs are sent as ordered merge sources, and the merged PDF is saved as a derived document.",
-    successMessage: "Merged PDF is ready to download."
+    successMessage: "Merged PDF is ready."
   }
 }
 
@@ -122,6 +122,31 @@ const getNewDerivedDocument = (
   return nextDocument.derivedDocuments[0] ?? null
 }
 
+const moveListItem = <Value,>(
+  values: Value[],
+  fromIndex: number,
+  direction: -1 | 1
+): Value[] => {
+  const nextIndex = fromIndex + direction
+
+  if (nextIndex < 0 || nextIndex >= values.length) {
+    return values
+  }
+
+  const nextValues = values.slice()
+  const currentValue = nextValues[fromIndex]
+  const targetValue = nextValues[nextIndex]
+
+  if (currentValue === undefined || targetValue === undefined) {
+    return values
+  }
+
+  nextValues[fromIndex] = targetValue
+  nextValues[nextIndex] = currentValue
+
+  return nextValues
+}
+
 const triggerDownload = (downloadUrl: string): void => {
   const downloadLink = window.document.createElement("a")
 
@@ -130,6 +155,16 @@ const triggerDownload = (downloadUrl: string): void => {
   window.document.body.append(downloadLink)
   downloadLink.click()
   downloadLink.remove()
+}
+
+const openResultWindow = (downloadUrl: string): void => {
+  window.open(downloadUrl, "_blank", "noopener")
+}
+
+const pause = async (timeoutMs: number): Promise<void> => {
+  await new Promise((resolve) => {
+    window.setTimeout(resolve, timeoutMs)
+  })
 }
 
 export const ToolPanel = ({
@@ -151,6 +186,9 @@ export const ToolPanel = ({
   const [uploadedMergeSources, setUploadedMergeSources] = useState<
     UploadedMergeSource[]
   >([])
+  const [derivedDocumentNames, setDerivedDocumentNames] = useState<
+    Record<string, string>
+  >({})
 
   useEffect(() => {
     setSelectedFile(null)
@@ -162,7 +200,28 @@ export const ToolPanel = ({
     setWorkingDocument(null)
     setResultDocument(null)
     setUploadedMergeSources([])
+    setDerivedDocumentNames({})
   }, [activeTool])
+
+  useEffect(() => {
+    if (workingDocument === null) {
+      setDerivedDocumentNames({})
+
+      return
+    }
+
+    setDerivedDocumentNames((currentValue) => {
+      const nextValue = { ...currentValue }
+
+      for (const derivedDocument of workingDocument.derivedDocuments) {
+        if (nextValue[derivedDocument.id] === undefined) {
+          nextValue[derivedDocument.id] = derivedDocument.name
+        }
+      }
+
+      return nextValue
+    })
+  }, [workingDocument])
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
     if (activeTool === "merge") {
@@ -172,7 +231,6 @@ export const ToolPanel = ({
     }
 
     setUploadState(INITIAL_UPLOAD_STATE)
-    setActionState(INITIAL_ACTION_STATE)
     setResultDocument(null)
   }
 
@@ -220,7 +278,7 @@ export const ToolPanel = ({
         setFileInputKey((currentValue) => currentValue + 1)
         setUploadState({
           kind: "success",
-          message: `${uploadedDocuments.length} PDF files uploaded and registered as merge sources.`
+          message: `${uploadedDocuments.length} PDF files uploaded and ready for merge ordering.`
         })
       } catch (error) {
         setUploadedMergeSources([])
@@ -343,8 +401,10 @@ export const ToolPanel = ({
         setActionState({
           kind: "error",
           code: error.code,
-          message: error.message,
-          technicalDetails: error.details
+          message: formatOperationErrorMessage({
+            code: error.code,
+            fallbackMessage: error.message
+          })
         })
 
         return
@@ -357,15 +417,98 @@ export const ToolPanel = ({
     }
   }
 
-  const handleDownload = (): void => {
-    if (workingDocument === null || resultDocument === null) {
+  const handleSelectedMergeFileMove = (
+    fileIndex: number,
+    direction: -1 | 1
+  ): void => {
+    setSelectedFiles((currentValue) => moveListItem(currentValue, fileIndex, direction))
+    setUploadState(INITIAL_UPLOAD_STATE)
+    setResultDocument(null)
+  }
+
+  const handleSelectedMergeFileRemove = (fileIndex: number): void => {
+    setSelectedFiles((currentValue) => {
+      return currentValue.filter((_, currentIndex) => currentIndex !== fileIndex)
+    })
+    setUploadState(INITIAL_UPLOAD_STATE)
+    setResultDocument(null)
+  }
+
+  const handleUploadedMergeSourceMove = (
+    sourceIndex: number,
+    direction: -1 | 1
+  ): void => {
+    setUploadedMergeSources((currentValue) => {
+      const nextValue = moveListItem(currentValue, sourceIndex, direction)
+      const nextRootSource = nextValue[0]
+
+      setWorkingDocument(nextRootSource?.document ?? null)
+
+      return nextValue
+    })
+    setResultDocument(null)
+  }
+
+  const handleUploadedMergeSourceRemove = (sourceIndex: number): void => {
+    setUploadedMergeSources((currentValue) => {
+      const nextValue = currentValue.filter((_, currentIndex) => {
+        return currentIndex !== sourceIndex
+      })
+      const nextRootSource = nextValue[0]
+
+      setWorkingDocument(nextRootSource?.document ?? null)
+
+      return nextValue
+    })
+    setResultDocument(null)
+  }
+
+  const handleDownload = (derivedDocumentId: string): void => {
+    if (workingDocument === null) {
       return
     }
 
     triggerDownload(
-      buildDerivedDocumentDownloadUrl(workingDocument.id, resultDocument.id)
+      buildDerivedDocumentDownloadUrl(workingDocument.id, derivedDocumentId)
     )
   }
+
+  const handleOpenResult = (derivedDocumentId: string): void => {
+    if (workingDocument === null) {
+      return
+    }
+
+    openResultWindow(
+      buildDerivedDocumentDownloadUrl(workingDocument.id, derivedDocumentId)
+    )
+  }
+
+  const handleDownloadAll = async (): Promise<void> => {
+    if (workingDocument === null || workingDocument.derivedDocuments.length < 2) {
+      return
+    }
+
+    for (const derivedDocument of workingDocument.derivedDocuments) {
+      triggerDownload(
+        buildDerivedDocumentDownloadUrl(workingDocument.id, derivedDocument.id)
+      )
+      await pause(150)
+    }
+  }
+
+  const handleDerivedDocumentNameChange = (
+    derivedDocumentId: string,
+    value: string
+  ): void => {
+    setDerivedDocumentNames((currentValue) => {
+      return {
+        ...currentValue,
+        [derivedDocumentId]: value
+      }
+    })
+  }
+
+  const derivedDocuments = workingDocument?.derivedDocuments ?? []
 
   return (
     <>
@@ -424,14 +567,56 @@ export const ToolPanel = ({
             </button>
           </form>
 
-          {activeTool === "merge" && selectedFiles.length > 0 ? (
-            <div className="tool-result-card">
-              <div>
-                <p className="details-list-title">Selected files</p>
-                <p className="details-list-meta">
-                  {selectedFiles.map((file) => file.name).join(", ")}
-                </p>
+          {activeTool === "merge" ? (
+            <div className="details-section">
+              <div className="section-header compact-section-header">
+                <h3>Selected files</h3>
+                <p>Review order before upload. Merge stays disabled until at least two PDFs are uploaded.</p>
               </div>
+
+              {selectedFiles.length === 0 ? (
+                <div className="empty-state section-empty-state">
+                  <h4>No files selected</h4>
+                  <p>Choose PDF files to build the merge list.</p>
+                </div>
+              ) : (
+                <ul className="details-list merge-order-list">
+                  {selectedFiles.map((file, index) => (
+                    <li className="details-list-item merge-order-item" key={`${file.name}-${index}`}>
+                      <div>
+                        <p className="details-list-title">#{index + 1}</p>
+                        <p className="details-list-caption">{file.name}</p>
+                      </div>
+
+                      <div className="item-action-row">
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={index === 0}
+                          onClick={() => handleSelectedMergeFileMove(index, -1)}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={index === selectedFiles.length - 1}
+                          onClick={() => handleSelectedMergeFileMove(index, 1)}
+                        >
+                          ↓
+                        </button>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          onClick={() => handleSelectedMergeFileRemove(index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           ) : null}
 
@@ -469,9 +654,27 @@ export const ToolPanel = ({
               className="secondary-button"
               type="button"
               disabled={resultDocument === null}
-              onClick={handleDownload}
+              onClick={() => resultDocument !== null && handleDownload(resultDocument.id)}
             >
-              Download result
+              Download latest
+            </button>
+
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={resultDocument === null}
+              onClick={() => resultDocument !== null && handleOpenResult(resultDocument.id)}
+            >
+              Open latest
+            </button>
+
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={derivedDocuments.length < 2}
+              onClick={() => void handleDownloadAll()}
+            >
+              Download all
             </button>
           </div>
 
@@ -493,33 +696,66 @@ export const ToolPanel = ({
               </div>
               <div>
                 <dt>Derived documents</dt>
-                <dd>{workingDocument.derivedDocuments.length}</dd>
+                <dd>{derivedDocuments.length}</dd>
               </div>
             </dl>
           ) : null}
 
-          {activeTool === "merge" && uploadedMergeSources.length > 0 ? (
+          {activeTool === "merge" ? (
             <div className="details-section">
               <div className="section-header compact-section-header">
                 <h3>Uploaded merge sources</h3>
-                <p>The first uploaded PDF is used as the root document and first merge source.</p>
+                <p>The first uploaded PDF is the root document and implicit first merge source.</p>
               </div>
 
-              <ul className="details-list">
-                {uploadedMergeSources.map((source, index) => (
-                  <li className="details-list-item" key={source.document.id}>
-                    <div>
-                      <p className="details-list-title">
-                        {index === 0 ? "Root source" : `Additional source ${index}`}
-                      </p>
-                      <p className="details-list-caption">{source.fileName}</p>
-                      <p className="details-list-meta">
-                        Document ID: <code>{source.document.id}</code>
-                      </p>
-                    </div>
-                  </li>
-                ))}
-              </ul>
+              {uploadedMergeSources.length === 0 ? (
+                <div className="empty-state section-empty-state">
+                  <h4>No uploaded sources</h4>
+                  <p>Upload the ordered PDF list to create merge-ready source documents.</p>
+                </div>
+              ) : (
+                <ul className="details-list merge-order-list">
+                  {uploadedMergeSources.map((source, index) => (
+                    <li className="details-list-item merge-order-item" key={source.document.id}>
+                      <div>
+                        <p className="details-list-title">
+                          {index === 0 ? `#${index + 1} Root source` : `#${index + 1} Additional source`}
+                        </p>
+                        <p className="details-list-caption">{source.fileName}</p>
+                        <p className="details-list-meta">
+                          Document ID: <code>{source.document.id}</code>
+                        </p>
+                      </div>
+
+                      <div className="item-action-row">
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={index === 0}
+                          onClick={() => handleUploadedMergeSourceMove(index, -1)}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={index === uploadedMergeSources.length - 1}
+                          onClick={() => handleUploadedMergeSourceMove(index, 1)}
+                        >
+                          ↓
+                        </button>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          onClick={() => handleUploadedMergeSourceRemove(index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           ) : null}
 
@@ -545,11 +781,6 @@ export const ToolPanel = ({
             <div className="status status-error action-status">
               <p className="status-title">Action failed</p>
               <p>{actionState.message}</p>
-              {actionState.technicalDetails !== undefined ? (
-                <p className="status-technical-details">
-                  Technical details: <code>{actionState.technicalDetails}</code>
-                </p>
-              ) : null}
               {actionState.code !== undefined ? (
                 <p className="status-technical-details">
                   Error code: <code>{actionState.code}</code>
@@ -561,19 +792,82 @@ export const ToolPanel = ({
           {resultDocument !== null ? (
             <div className="tool-result-card">
               <div>
-                <p className="details-list-title">{resultDocument.name}</p>
+                <p className="details-list-title">
+                  {derivedDocumentNames[resultDocument.id] ?? resultDocument.name}
+                </p>
                 <p className="details-list-meta">
-                  Derived ID: <code>{resultDocument.id}</code>
+                  Latest result ID: <code>{resultDocument.id}</code>
                 </p>
               </div>
 
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={handleDownload}
-              >
-                Download
-              </button>
+              <div className="item-action-row">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => handleOpenResult(resultDocument.id)}
+                >
+                  Open
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => handleDownload(resultDocument.id)}
+                >
+                  Download
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {derivedDocuments.length > 0 ? (
+            <div className="details-section">
+              <div className="section-header compact-section-header">
+                <h3>Derived results</h3>
+                <p>Rename items locally in the UI, open results in a new tab, or download one by one.</p>
+              </div>
+
+              <ul className="details-list">
+                {derivedDocuments.map((derivedDocument) => (
+                  <li className="details-list-item derived-result-item" key={derivedDocument.id}>
+                    <div className="derived-result-content">
+                      <label className="field">
+                        <span>Result name</span>
+                        <input
+                          value={
+                            derivedDocumentNames[derivedDocument.id] ?? derivedDocument.name
+                          }
+                          onChange={(event) =>
+                            handleDerivedDocumentNameChange(
+                              derivedDocument.id,
+                              event.currentTarget.value
+                            )
+                          }
+                        />
+                      </label>
+                      <p className="details-list-meta">
+                        Derived ID: <code>{derivedDocument.id}</code>
+                      </p>
+                    </div>
+
+                    <div className="item-action-row">
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => handleOpenResult(derivedDocument.id)}
+                      >
+                        Open
+                      </button>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => handleDownload(derivedDocument.id)}
+                      >
+                        Download
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
         </div>

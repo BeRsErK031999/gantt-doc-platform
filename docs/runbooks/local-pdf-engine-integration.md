@@ -140,7 +140,7 @@ Important merge behavior:
 
 Open the local web app and choose `Merge PDF`.
 
-### 2. Choose two small PDFs
+### 2. Choose three small PDFs
 
 Use the merge tool input:
 
@@ -150,7 +150,10 @@ Use the merge tool input:
 
 Expected UI behavior:
 
-- both files appear in the selected list;
+- all selected files appear in the selected list with order numbers;
+- up/down buttons reorder the list;
+- remove deletes a file from the list;
+- merge action stays disabled until at least two uploaded PDFs remain;
 - upload button is enabled.
 
 ### 3. Upload files
@@ -159,9 +162,18 @@ Expected result:
 
 - HTTP `201` for each `POST /documents`;
 - HTTP `200` for each `POST /documents/:id/upload`;
-- two local source files stored under `storage/documents/<documentId>/original.pdf`;
-- Toolbox shows uploaded document ids;
+- local source files stored under `storage/documents/<documentId>/original.pdf`;
+- Toolbox shows uploaded document ids in the current order;
 - the first uploaded document becomes the root merge document.
+
+### 4. Reorder and remove in uploaded list
+
+Expected result:
+
+- uploaded merge sources still show order numbers;
+- up/down changes which document is treated as the root source;
+- remove updates the future merge source list immediately;
+- merge action remains disabled if fewer than two uploaded PDFs remain.
 
 ### 4. Run `merge-pdf`
 
@@ -182,7 +194,9 @@ Expected result:
 - derived document has `derivationKind = "merge-pdf"`;
 - derived document kind stays `pdf`;
 - file stored under `storage/documents/<rootDocumentId>/derived/<derivedDocumentId>/<engineFileName>`;
-- if the engine omits a filename, local fallback is `merged.pdf`.
+- if the engine omits a filename, local fallback is `merged.pdf`;
+- latest result area shows `Open` and `Download`;
+- derived results list allows local UI-only rename without changing backend document state.
 
 ### 5. Download merged result
 
@@ -198,7 +212,8 @@ Checks:
 - non-empty file;
 - `Content-Type = application/pdf`;
 - `Content-Disposition` uses the stored filename;
-- first bytes start with `%PDF-`.
+- first bytes start with `%PDF-`;
+- `Open latest` uses the same download endpoint in a new browser tab/window.
 
 ### 6. Verify document details
 
@@ -207,6 +222,15 @@ Open the root document details screen and confirm:
 - operation history contains completed `merge-pdf`;
 - derived documents contains the merged PDF;
 - download button works for the merged derived document.
+
+### 7. Verify global history UX
+
+Open `History` and confirm:
+
+- operations are grouped into `Today` and `Earlier`;
+- filters `All`, `Success`, and `Failed` change the visible list;
+- failed items are visually emphasized;
+- failed items expose `Retry`.
 
 ## Negative Checks
 
@@ -253,7 +277,10 @@ Expected:
 - engine request fails;
 - token value is not logged;
 - token value is not returned in API response;
-- API error uses `PDF_ENGINE_AUTH_INVALID`.
+- API error uses `PDF_ENGINE_AUTH_INVALID`;
+- tool panel shows a human-readable message about token rejection;
+- the error remains visible until the next upload or action attempt;
+- failed history entry exposes `Retry`.
 
 ### Engine unavailable
 
@@ -261,11 +288,31 @@ Stop `gantt-pdf-platform` and rerun `merge-pdf`.
 
 Expected:
 
-- API error uses `PDF_ENGINE_UNAVAILABLE`.
+- API error uses `PDF_ENGINE_UNAVAILABLE`;
+- history records a failed operation entry;
+- retry can be attempted again after the engine comes back.
+
+### Download troubleshooting
+
+If `Open` downloads instead of previewing inline:
+
+- confirm the browser has a PDF viewer enabled;
+- confirm the result `Content-Type` is `application/pdf`;
+- remember that split results may still be ZIP and therefore download directly.
+
+### Storage troubleshooting
+
+If retry fails with missing-source errors:
+
+- confirm the original uploaded files still exist under `storage/documents/<documentId>/original.pdf`;
+- confirm the referenced source documents were not manually deleted from `data/documents.json`;
+- reload history after restoring local files.
 
 ## Runtime Check Notes
 
 - merge uses the current root document as the implicit first source because that is the actual `gantt-pdf-platform` contract;
 - doc-platform uploads each additional merge source as its own engine document before creating the merge job;
 - doc-platform does not merge bytes locally;
+- global history retry reuses the stored PDF operation input and calls the existing doc-platform action endpoint again;
+- `Download all` intentionally stays as sequential browser downloads instead of introducing backend ZIP assembly;
 - local runtime artifacts under `data/`, `storage/`, `dist/`, `node_modules/`, and `.yarn/` must remain untracked.

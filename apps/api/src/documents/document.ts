@@ -30,9 +30,25 @@ export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKin
 
 export type DocumentOperationStatus = "completed" | "failed"
 
+export type DocumentOperationInput =
+  | {
+      kind: "compress-pdf"
+    }
+  | {
+      kind: "split-pdf"
+      pageRanges: string
+    }
+  | {
+      kind: "merge-pdf"
+      sourceDocumentIds: string[]
+      excludePageRanges?: string
+      pageNumberingMode?: MergePdfPageNumberingMode
+    }
+
 export type DocumentOperation = {
   id: string
   kind: PdfEngineActionKind
+  input?: DocumentOperationInput
   status: DocumentOperationStatus
   createdAt: string
   finishedAt: string | null

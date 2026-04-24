@@ -1,78 +1,38 @@
 import { useState } from "react"
 
+import { HistoryPanel } from "./HistoryPanel"
 import { ToolPanel } from "./ToolPanel"
 import type { ActiveTool } from "./ToolPanel"
-
-type ToolDefinition = {
-  description: string
-  id: ActiveTool
-  title: string
-}
-
-const TOOL_DEFINITIONS: ToolDefinition[] = [
-  {
-    id: "compress",
-    title: "Compress PDF",
-    description:
-      "Upload a PDF, run compression through the existing backend flow, and download the derived document."
-  },
-  {
-    id: "split",
-    title: "Split PDF",
-    description:
-      "Upload a PDF, define page ranges, run split through the existing backend flow, and download the ZIP result."
-  },
-  {
-    id: "merge",
-    title: "Merge PDF",
-    description:
-      "Upload multiple PDFs, run merge through the external PDF engine, and download the merged derived PDF."
-  }
-]
+import { ToolboxView } from "./ToolboxView"
 
 export const App = () => {
+  const [view, setView] = useState<"toolbox" | "history" | "tool">("toolbox")
   const [activeTool, setActiveTool] = useState<ActiveTool | null>(null)
+
+  const handleOpenTool = (tool: ActiveTool): void => {
+    setActiveTool(tool)
+    setView("tool")
+  }
+
+  const handleBackToToolbox = (): void => {
+    setActiveTool(null)
+    setView("toolbox")
+  }
 
   return (
     <main className="page">
       <section className="panel">
-        {activeTool === null ? (
-          <>
-            <div className="hero">
-              <p className="eyebrow">Document platform</p>
-              <h1 className="title">PDF Tools</h1>
-              <p className="description">
-                Start with a tool first. The document is created automatically
-                after upload, then the existing backend flow handles processing,
-                derived documents, history, and download.
-              </p>
-            </div>
-
-            <section className="section toolbox-section">
-              <div className="section-header">
-                <h2>Toolbox</h2>
-                <p>Choose the PDF action you want to run.</p>
-              </div>
-
-              <div className="toolbox-grid">
-                {TOOL_DEFINITIONS.map((tool) => (
-                  <button
-                    className="toolbox-card"
-                    key={tool.id}
-                    type="button"
-                    onClick={() => setActiveTool(tool.id)}
-                  >
-                    <span className="toolbox-card-title">{tool.title}</span>
-                    <span className="toolbox-card-description">
-                      {tool.description}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          </>
+        {view === "toolbox" ? (
+          <ToolboxView
+            onOpenHistory={() => setView("history")}
+            onOpenTool={handleOpenTool}
+          />
+        ) : view === "history" ? (
+          <HistoryPanel onBack={handleBackToToolbox} />
         ) : (
-          <ToolPanel activeTool={activeTool} onBack={() => setActiveTool(null)} />
+          activeTool !== null && (
+            <ToolPanel activeTool={activeTool} onBack={handleBackToToolbox} />
+          )
         )}
       </section>
     </main>

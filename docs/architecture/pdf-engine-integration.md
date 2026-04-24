@@ -21,6 +21,19 @@ This document records the current real integration between `gantt-doc-platform` 
 
 `gantt-doc-platform` must not implement local PDF merge logic.
 
+## Current UX Layer
+
+The current web UI keeps the existing API architecture but adds a richer PDF-tools workflow on top of it.
+
+Current UX scope:
+
+- Toolbox keeps the same three operations but exposes them as a more product-like entry point;
+- merge now includes ordered source review, up/down reordering, remove actions, and disabled merge validation until at least two uploaded PDFs are ready;
+- history now supports `all`, `success`, and `failed` filters plus simple `Today` and `Earlier` grouping;
+- failed history entries are visually emphasized and expose a retry action backed by the stored operation input;
+- derived results now support `Open`, local UI-only rename, and `Download all` through sequential downloads;
+- human-readable error guidance remains frontend-only and does not change the backend error contract.
+
 ## Supported Operations
 
 The current integration supports three real PDF engine actions:
@@ -160,6 +173,13 @@ Current behavior:
 - merge downloads reuse the stored merge filename and media type instead of hardcoding PDF headers globally;
 - split results may still download as PDF or ZIP depending on the stored engine output.
 
+Current web download UX:
+
+- `Download latest` downloads the newest derived result from the active tool panel;
+- `Open latest` uses `window.open` against the same derived download endpoint;
+- every derived result row keeps a local UI-only editable display name without mutating backend document state;
+- if a source document already has multiple derived artifacts, the tool panel exposes `Download all` and triggers sequential downloads for the current source document result set.
+
 ## Error Response Shape
 
 Engine-backed failures use the same structured contract:
@@ -180,17 +200,36 @@ Example:
 
 The backend must not return raw stack traces or secrets in this contract.
 
+## Stored Operation Context
+
+To support retry from global history, every PDF engine operation now persists a minimal `input` payload together with the operation record:
+
+- `compress-pdf`: action kind only;
+- `split-pdf`: action kind plus `pageRanges`;
+- `merge-pdf`: action kind plus ordered `sourceDocumentIds` and optional merge flags.
+
+This is still local workspace state stored in the existing documents store. It is not a queue, scheduler, or workflow engine.
+
 ## Runtime Checks
 
 Current runtime checks for `merge-pdf`:
 
 - require at least two uploaded PDFs in Toolbox before merge can run;
+- allow ordered merge source review before upload and after upload through simple up/down controls;
+- allow removing selected or uploaded merge sources before execution;
 - reject non-PDF merge sources;
 - reject sources without uploaded local files;
 - reject missing local storage files before calling the engine;
 - reject wrong engine token through `PDF_ENGINE_AUTH_INVALID`;
 - reject engine downtime through `PDF_ENGINE_UNAVAILABLE`;
 - reject invalid merge result artifacts through `PDF_ENGINE_MERGE_RESULT_INVALID`.
+
+Current runtime checks for history and retry:
+
+- history is built from local document details and remains newest-first;
+- filters are frontend-only and do not change API payloads;
+- retry reuses the stored operation input and calls the same `/documents/:id/actions` endpoint;
+- retry is intentionally limited to PDF engine operations already recorded in history.
 
 ## Stable Error Codes
 
@@ -239,6 +278,13 @@ The current integration intentionally stays narrow:
 - no client-side PDF merge implementation;
 - no shared SDK between repositories;
 - no new engine actions beyond `compress-pdf`, `split-pdf`, and `merge-pdf`.
+
+## Troubleshooting Notes
+
+- If `Open` downloads instead of rendering inline, that is browser behavior driven by the returned media type and browser PDF handling, not a separate doc-platform endpoint.
+- If `Retry` fails immediately for merge, first confirm that the referenced source documents still exist locally and their uploaded source files are still present under `storage/`.
+- If `Download all` opens fewer dialogs than expected, check the browser popup/download policy because the implementation intentionally stays as sequential client-side downloads instead of introducing ZIP assembly.
+- If history appears stale after a failed retry, use the refresh action; the current UX keeps global history loading simple and explicit.
 
 ## Git Hygiene
 

@@ -71,6 +71,38 @@ const isDocumentOperationStatus = (
   return value === "completed" || value === "failed"
 }
 
+const isDocumentOperationInput = (
+  value: unknown
+): value is DocumentOperation["input"] => {
+  if (value === undefined) {
+    return true
+  }
+
+  if (!isRecord(value) || !isPdfEngineActionKind(value.kind)) {
+    return false
+  }
+
+  if (value.kind === "compress-pdf") {
+    return true
+  }
+
+  if (value.kind === "split-pdf") {
+    return typeof value.pageRanges === "string"
+  }
+
+  return (
+    Array.isArray(value.sourceDocumentIds) &&
+    value.sourceDocumentIds.every((sourceDocumentId) => {
+      return typeof sourceDocumentId === "string"
+    }) &&
+    (typeof value.excludePageRanges === "string" ||
+      value.excludePageRanges === undefined) &&
+    (value.pageNumberingMode === "none" ||
+      value.pageNumberingMode === "append" ||
+      value.pageNumberingMode === undefined)
+  )
+}
+
 const isDocumentOperation = (value: unknown): value is DocumentOperation => {
   if (!isRecord(value)) {
     return false
@@ -79,6 +111,8 @@ const isDocumentOperation = (value: unknown): value is DocumentOperation => {
   return (
     typeof value.id === "string" &&
     isPdfEngineActionKind(value.kind) &&
+    isDocumentOperationInput(value.input) &&
+    (value.input === undefined || value.input.kind === value.kind) &&
     isDocumentOperationStatus(value.status) &&
     typeof value.createdAt === "string" &&
     (typeof value.finishedAt === "string" || value.finishedAt === null) &&
@@ -376,6 +410,34 @@ const parseDocumentsStoragePayload = (value: unknown): Document[] | null => {
     }
 
     if (isBackwardCompatibleDocument(document)) {
+      const normalizedOperations: DocumentOperation[] =
+        document.operations !== undefined && Array.isArray(document.operations)
+          ? document.operations.flatMap<DocumentOperation>((operation) => {
+              if (isDocumentOperation(operation)) {
+                return [operation]
+              }
+
+              if (!isLegacyDocumentOperation(operation)) {
+                return []
+              }
+
+              if (!isPdfEngineActionKind(operation.kind)) {
+                return []
+              }
+
+              return [
+                {
+                  id: operation.id,
+                  kind: operation.kind,
+                  status:
+                    operation.status === "failed" ? "failed" : "completed",
+                  createdAt: document.createdAt,
+                  finishedAt: null
+                }
+              ]
+            })
+          : []
+
       documents.push({
         ...document,
         origin:
@@ -387,12 +449,7 @@ const parseDocumentsStoragePayload = (value: unknown): Document[] | null => {
                   document.origin.derivationKind
                 )
               },
-        operations:
-          document.operations !== undefined &&
-          Array.isArray(document.operations) &&
-          document.operations.every((operation) => isDocumentOperation(operation))
-            ? document.operations
-            : [],
+        operations: normalizedOperations,
         derivedDocuments: []
       })
       continue

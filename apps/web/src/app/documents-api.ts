@@ -32,10 +32,39 @@ export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKin
 
 export type DocumentOperationStatus = "completed" | "failed"
 
+export type DocumentOperationInput =
+  | {
+      kind: "compress-pdf"
+    }
+  | {
+      kind: "split-pdf"
+      pageRanges: string
+    }
+  | {
+      kind: "merge-pdf"
+      sourceDocumentIds: string[]
+      excludePageRanges?: string
+      pageNumberingMode?: MergePdfPageNumberingMode
+    }
+
 export type DocumentOperation = {
   id: string
   kind: PdfEngineActionKind
+  input?: DocumentOperationInput
   status: DocumentOperationStatus
+  createdAt: string
+  finishedAt: string | null
+  errorCode?: string
+  errorMessage?: string
+}
+
+export type OperationHistoryEntry = {
+  id: string
+  documentId: string
+  documentName: string
+  kind: DocumentOperation["kind"]
+  input?: DocumentOperationInput
+  status: DocumentOperation["status"]
   createdAt: string
   finishedAt: string | null
   errorCode?: string
@@ -174,6 +203,38 @@ const isDocumentOperationStatus = (
   return value === "completed" || value === "failed"
 }
 
+const isDocumentOperationInput = (
+  value: unknown
+): value is DocumentOperation["input"] => {
+  if (value === undefined) {
+    return true
+  }
+
+  if (!isRecord(value) || !isDocumentOperationKind(value.kind)) {
+    return false
+  }
+
+  if (value.kind === "compress-pdf") {
+    return true
+  }
+
+  if (value.kind === "split-pdf") {
+    return typeof value.pageRanges === "string"
+  }
+
+  return (
+    Array.isArray(value.sourceDocumentIds) &&
+    value.sourceDocumentIds.every((sourceDocumentId) => {
+      return typeof sourceDocumentId === "string"
+    }) &&
+    (typeof value.excludePageRanges === "string" ||
+      value.excludePageRanges === undefined) &&
+    (value.pageNumberingMode === "none" ||
+      value.pageNumberingMode === "append" ||
+      value.pageNumberingMode === undefined)
+  )
+}
+
 const isDocumentDerivationKind = (
   value: unknown
 ): value is DocumentDerivationKind => {
@@ -194,6 +255,8 @@ const isDocumentOperation = (value: unknown): value is DocumentOperation => {
   return (
     typeof value.id === "string" &&
     isDocumentOperationKind(value.kind) &&
+    isDocumentOperationInput(value.input) &&
+    (value.input === undefined || value.input.kind === value.kind) &&
     isDocumentOperationStatus(value.status) &&
     typeof value.createdAt === "string" &&
     (typeof value.finishedAt === "string" || value.finishedAt === null) &&
@@ -399,6 +462,45 @@ export const loadDocument = async (
   }
 
   return payload
+}
+
+const getOperationHistoryTimestamp = (value: string): number => {
+  const timestamp = Date.parse(value)
+
+  return Number.isNaN(timestamp) ? 0 : timestamp
+}
+
+export const loadOperationsHistory = async (
+  signal?: AbortSignal
+): Promise<OperationHistoryEntry[]> => {
+  const documents = await loadDocuments(signal)
+  const documentDetails = await Promise.all(
+    documents.map(async (document) => loadDocument(document.id, signal))
+  )
+
+  return documentDetails
+    .flatMap((document) => {
+      return document.operations.map((operation) => {
+        return {
+          id: operation.id,
+          documentId: document.id,
+          documentName: document.name,
+          kind: operation.kind,
+          input: operation.input,
+          status: operation.status,
+          createdAt: operation.createdAt,
+          finishedAt: operation.finishedAt,
+          errorCode: operation.errorCode,
+          errorMessage: operation.errorMessage
+        }
+      })
+    })
+    .sort((leftOperation, rightOperation) => {
+      return (
+        getOperationHistoryTimestamp(rightOperation.createdAt) -
+        getOperationHistoryTimestamp(leftOperation.createdAt)
+      )
+    })
 }
 
 export const createDocument = async (
