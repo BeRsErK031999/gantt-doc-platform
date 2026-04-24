@@ -24,6 +24,10 @@ export const formatCreatedAt = (value: string): string => {
 }
 
 export const formatDocumentKind = (value: DocumentKind): string => {
+  if (value === "docx") {
+    return "DOCX"
+  }
+
   return value.toUpperCase()
 }
 
@@ -70,6 +74,8 @@ export const formatOperationKind = (value: DocumentOperation["kind"]): string =>
       return "Generate derived document"
     case "compress-pdf":
       return "Compress PDF"
+    case "split-pdf":
+      return "Split PDF"
   }
 }
 
@@ -78,6 +84,7 @@ export const formatOperationBoundary = (
 ): string => {
   switch (value) {
     case "compress-pdf":
+    case "split-pdf":
       return "PDF engine"
     case "convert-to-pdf":
     case "extract-metadata":
@@ -105,8 +112,8 @@ export const formatDerivationKind = (value: DocumentDerivationKind): string => {
       return "Document summary"
     case "compressed-pdf":
       return "Compressed PDF"
-    case "split-pdf-set":
-      return "Split PDF set"
+    case "split-pdf":
+      return "Split PDF"
   }
 }
 

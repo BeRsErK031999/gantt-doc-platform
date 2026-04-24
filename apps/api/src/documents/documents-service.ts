@@ -18,11 +18,12 @@ import type {
   CreateDocumentInput,
   DerivedDocument,
   Document,
-  DocumentActionKind,
   DocumentDerivationKind,
   DocumentDetails,
+  DocumentKind,
   DocumentSummary
 } from "./document.js"
+import type { DocumentActionKind } from "./document.js"
 import type { DocumentsStore } from "./documents-store.js"
 import type { LocalDocumentFileStorage } from "./local-file-storage.js"
 import type { PdfEngineGateway } from "../pdf-engine/pdf-engine-gateway.js"
@@ -31,9 +32,20 @@ export type RunDocumentActionResult =
   | { kind: "updated"; document: DocumentDetails }
   | { kind: "not-found" }
   | {
+      code: string
+      details?: string
       kind: "error"
       message: string
-      statusCode: 400 | 500 | 502
+      statusCode: 400 | 500 | 502 | 503
+    }
+
+export type RunDocumentActionInput =
+  | {
+      kind: Exclude<DocumentActionKind, "split-pdf">
+    }
+  | {
+      kind: "split-pdf"
+      pageRanges: string
     }
 
 export type UploadDocumentSourceFileInput = {
@@ -59,6 +71,7 @@ export type DocumentsService = {
         kind: "ready"
         contents: Uint8Array
         fileName: string
+        mediaType: string
       }
     | { kind: "document-not-found" }
     | { kind: "derived-document-not-found" }
@@ -71,8 +84,28 @@ export type DocumentsService = {
   ) => Promise<UploadDocumentSourceFileResult>
   runDocumentAction: (
     documentId: string,
-    actionKind: DocumentActionKind
+    input: RunDocumentActionInput
   ) => Promise<RunDocumentActionResult>
+}
+
+const createActionError = ({
+  code,
+  details,
+  message,
+  statusCode
+}: {
+  code: string
+  details?: string
+  message: string
+  statusCode: 400 | 500 | 502 | 503
+}): Extract<RunDocumentActionResult, { kind: "error" }> => {
+  return {
+    kind: "error",
+    code,
+    message,
+    details,
+    statusCode
+  }
 }
 
 const toDocumentSummary = (document: Document): DocumentSummary => {
@@ -147,7 +180,7 @@ const buildDerivedDocumentName = (
       return `${trimmedName} summary ${nextIndex}`
     case "compressed-pdf":
       return `${trimmedName} compressed PDF placeholder (stub ${engineRequestId ?? "local"})`
-    case "split-pdf-set":
+    case "split-pdf":
       return `${trimmedName} split PDF placeholder (stub ${engineRequestId ?? "local"})`
   }
 }
@@ -196,47 +229,63 @@ const buildDerivedDocument = ({
   }
 }
 
-const buildCompressedDerivedDocument = ({
+const getDocumentKindFromMediaType = (mediaType: string): DocumentKind => {
+  if (mediaType === "application/zip") {
+    return "zip"
+  }
+
+  return "pdf"
+}
+
+const buildPdfEngineDerivedDocument = ({
+  derivationKind,
   document,
   derivedDocumentId,
   fileName,
+  mediaType,
   savedFilePath,
   sizeBytes
 }: {
+  derivationKind: Extract<DocumentDerivationKind, "compressed-pdf" | "split-pdf">
   derivedDocumentId: string
   document: Document
   fileName: string
+  mediaType: string
   savedFilePath: string
   sizeBytes: number
 }): Document => {
   const createdAt = new Date().toISOString()
-  const documentName = `${document.name.trim()} compressed PDF`
+  const documentKind = getDocumentKindFromMediaType(mediaType)
+  const documentName =
+    derivationKind === "compressed-pdf"
+      ? `${document.name.trim()} compressed PDF`
+      : `${document.name.trim()} split PDF`
 
   return {
     id: derivedDocumentId,
     name: documentName,
-    kind: "pdf",
+    kind: documentKind,
     status: "ready",
     createdAt,
     origin: {
       documentId: document.id,
       relationshipKind: "derived-from",
-      derivationKind: "compressed-pdf"
+      derivationKind
     },
     sourceArtifact: {
       id: `${derivedDocumentId}-source-artifact-1`,
       documentId: derivedDocumentId,
       fileName,
-      kind: "pdf",
+      kind: documentKind,
       storageKind: "local-file",
       status: "uploaded",
       createdAt,
       path: savedFilePath
     },
-    operations: buildPlannedOperations(derivedDocumentId, "pdf"),
+    operations: [],
     metadata: {
       sourceFileName: fileName,
-      mimeType: "application/pdf",
+      mimeType: mediaType,
       sizeBytes,
       pageCount: null,
       wordCount: null
@@ -328,7 +377,8 @@ export const createDocumentsService = (
         return {
           kind: "ready",
           contents: await localFileStorage.readStorageFile(storagePath),
-          fileName: derivedDocument.sourceArtifact.fileName
+          fileName: derivedDocument.sourceArtifact.fileName,
+          mediaType: derivedDocument.metadata.mimeType
         }
       } catch (error) {
         return {
@@ -388,7 +438,8 @@ export const createDocumentsService = (
         document: withDerivedDocuments(updatedDocument, store.listDocuments())
       }
     },
-    runDocumentAction: async (documentId, actionKind) => {
+    runDocumentAction: async (documentId, input) => {
+      const actionKind = input.kind
       const document = store.getDocumentById(documentId)
 
       if (document === null) {
@@ -427,42 +478,46 @@ export const createDocumentsService = (
       }
 
       if (!isPdfEngineActionSupportedForDocument(document.kind, actionKind)) {
-        return {
-          kind: "error",
+        return createActionError({
+          code: "PDF_ACTION_UNSUPPORTED_DOCUMENT_KIND",
           message: "PDF engine actions are only supported for PDF documents.",
           statusCode: 400
-        }
+        })
       }
 
       if (document.sourceArtifact.status !== "uploaded") {
-        return {
-          kind: "error",
+        return createActionError({
+          code: "SOURCE_FILE_NOT_UPLOADED",
           message:
-            "Source file is not uploaded yet. Upload a local PDF file before running compress-pdf.",
+            actionKind === "split-pdf"
+              ? "Source file is not uploaded yet. Upload a local PDF file before running split-pdf."
+              : "Source file is not uploaded yet. Upload a local PDF file before running compress-pdf.",
           statusCode: 400
-        }
+        })
       }
 
       if (
         document.sourceArtifact.storageKind !== "local-file" ||
         document.sourceArtifact.path === undefined
       ) {
-        return {
-          kind: "error",
+        return createActionError({
+          code: "SOURCE_FILE_STORAGE_UNAVAILABLE",
           message:
             "Source artifact is not backed by a local file path and cannot be sent to the PDF engine.",
           statusCode: 400
-        }
+        })
       }
 
       const sourceFilePath = document.sourceArtifact.path
 
       if (!(await localFileStorage.storagePathExists(sourceFilePath))) {
-        return {
-          kind: "error",
-          message: `Source file does not exist on disk: ${sourceFilePath}`,
+        return createActionError({
+          code: "SOURCE_FILE_MISSING",
+          details: `Missing storage path: ${sourceFilePath}`,
+          message:
+            "Uploaded source PDF could not be found in local storage.",
           statusCode: 400
-        }
+        })
       }
 
       let absoluteSourceFilePath: string
@@ -474,17 +529,19 @@ export const createDocumentsService = (
         const message =
           error instanceof Error ? error.message : "Unknown storage path error."
 
-        return {
-          kind: "error",
-          message: `Source file path is invalid: ${message}`,
+        return createActionError({
+          code: "SOURCE_FILE_PATH_INVALID",
+          details: message,
+          message: "Source file path is invalid and cannot be resolved.",
           statusCode: 400
-        }
+        })
       }
 
       const pdfEngineResult = await pdfEngineGateway.submitPdfAction({
         actionKind,
         documentId: document.id,
         documentName: document.name,
+        pageRanges: input.kind === "split-pdf" ? input.pageRanges : undefined,
         sourceFileName: document.metadata.sourceFileName,
         sourceFilePath: absoluteSourceFilePath
       })
@@ -504,7 +561,7 @@ export const createDocumentsService = (
           await localFileStorage.saveDerivedDocumentFile({
             contents: pdfEngineResult.resultFileContents,
             derivedDocumentId,
-            fileName: "compressed.pdf",
+            fileName: pdfEngineResult.resultFileName,
             originDocumentId: document.id
           })
         ).path
@@ -512,18 +569,25 @@ export const createDocumentsService = (
         const message =
           error instanceof Error ? error.message : "Unknown local storage error."
 
-        return {
-          kind: "error",
-          message: `Compressed result could not be saved locally: ${message}`,
+        return createActionError({
+          code: "LOCAL_DERIVED_FILE_SAVE_FAILED",
+          details: message,
+          message:
+            actionKind === "split-pdf"
+              ? "Split PDF result was created but could not be saved locally."
+              : "Compressed PDF was created but could not be saved locally.",
           statusCode: 500
-        }
+        })
       }
 
       store.createDocument(
-        buildCompressedDerivedDocument({
+        buildPdfEngineDerivedDocument({
+          derivationKind:
+            actionKind === "split-pdf" ? "split-pdf" : "compressed-pdf",
           document,
           derivedDocumentId,
-          fileName: "compressed.pdf",
+          fileName: pdfEngineResult.resultFileName,
+          mediaType: pdfEngineResult.mediaType,
           savedFilePath: savedDerivedFilePath,
           sizeBytes: pdfEngineResult.resultFileContents.byteLength
         })

@@ -5,8 +5,7 @@ import type {
   DocumentActionKind
 } from "../documents/document.js"
 import {
-  isDocumentActionKind,
-  isDocumentKind
+  isDocumentActionKind
 } from "../documents/document.js"
 import type { DocumentsService } from "../documents/documents-service.js"
 
@@ -14,6 +13,8 @@ const INVALID_DOCUMENT_PAYLOAD_MESSAGE =
   "Document payload must include a non-empty name and a valid kind."
 const INVALID_DOCUMENT_ACTION_PAYLOAD_MESSAGE =
   "Document action payload must include a supported action kind."
+const INVALID_SPLIT_PAGE_RANGES_MESSAGE =
+  "Split PDF action payload must include a non-empty pageRanges string using values such as \"1\", \"1-2\", or \"1-3,5\"."
 const INVALID_DOCUMENT_UPLOAD_PAYLOAD_MESSAGE =
   "Document upload must include one file field named file."
 const DOCUMENT_NOT_FOUND_MESSAGE = "Document was not found."
@@ -21,8 +22,27 @@ const DERIVED_DOCUMENT_NOT_FOUND_MESSAGE = "Derived document was not found."
 const DERIVED_DOCUMENT_FILE_NOT_FOUND_MESSAGE =
   "Derived document file was not found."
 
+type ErrorResponseBody = {
+  code: string
+  details?: string
+  message: string
+}
+
+type ParsedDocumentActionInput =
+  | {
+      kind: Exclude<DocumentActionKind, "split-pdf">
+    }
+  | {
+      kind: "split-pdf"
+      pageRanges: string
+    }
+
 const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === "object" && value !== null
+}
+
+const isCreatableDocumentKind = (value: unknown): value is CreateDocumentInput["kind"] => {
+  return value === "pdf" || value === "docx"
 }
 
 const parseCreateDocumentInput = (
@@ -38,7 +58,7 @@ const parseCreateDocumentInput = (
     return null
   }
 
-  if (!isDocumentKind(kind)) {
+  if (!isCreatableDocumentKind(kind)) {
     return null
   }
 
@@ -48,7 +68,13 @@ const parseCreateDocumentInput = (
   }
 }
 
-const parseDocumentActionKind = (value: unknown): DocumentActionKind | null => {
+const isValidSplitPageRanges = (value: string): boolean => {
+  return /^[\d,\-\s]+$/.test(value)
+}
+
+const parseDocumentActionInput = (
+  value: unknown
+): ParsedDocumentActionInput | null => {
   if (!isRecord(value)) {
     return null
   }
@@ -59,7 +85,43 @@ const parseDocumentActionKind = (value: unknown): DocumentActionKind | null => {
     return null
   }
 
-  return kind
+  if (kind !== "split-pdf") {
+    return {
+      kind
+    }
+  }
+
+  const { pageRanges } = value
+
+  if (typeof pageRanges !== "string") {
+    return null
+  }
+
+  const normalizedPageRanges = pageRanges.trim()
+
+  if (
+    normalizedPageRanges.length === 0 ||
+    !isValidSplitPageRanges(normalizedPageRanges)
+  ) {
+    return null
+  }
+
+  return {
+    kind,
+    pageRanges: normalizedPageRanges
+  }
+}
+
+const buildErrorResponse = ({
+  code,
+  details,
+  message
+}: ErrorResponseBody): ErrorResponseBody => {
+  return {
+    code,
+    details,
+    message
+  }
 }
 
 export const registerDocumentsRoute = (
@@ -80,6 +142,7 @@ export const registerDocumentsRoute = (
         reply.code(404)
 
         return {
+          code: "DOCUMENT_NOT_FOUND",
           message: DOCUMENT_NOT_FOUND_MESSAGE
         }
       }
@@ -101,7 +164,7 @@ export const registerDocumentsRoute = (
 
       switch (downloadResult.kind) {
         case "ready":
-          reply.header("Content-Type", "application/pdf")
+          reply.header("Content-Type", downloadResult.mediaType)
           reply.header(
             "Content-Disposition",
             `attachment; filename="${downloadResult.fileName}"`
@@ -112,26 +175,40 @@ export const registerDocumentsRoute = (
           reply.code(404)
 
           return {
+            code: "DOCUMENT_NOT_FOUND",
             message: DOCUMENT_NOT_FOUND_MESSAGE
           }
         case "derived-document-not-found":
           reply.code(404)
 
           return {
+            code: "DERIVED_DOCUMENT_NOT_FOUND",
             message: DERIVED_DOCUMENT_NOT_FOUND_MESSAGE
           }
         case "file-not-found":
           reply.code(404)
 
           return {
+            code: "DERIVED_DOCUMENT_FILE_NOT_FOUND",
             message: DERIVED_DOCUMENT_FILE_NOT_FOUND_MESSAGE
           }
         case "error":
           reply.code(500)
+          request.log.error(
+            {
+              code: "DERIVED_DOCUMENT_DOWNLOAD_FAILED",
+              details: downloadResult.message,
+              derivedDocumentId: request.params.derivedId,
+              documentId: request.params.id
+            },
+            "Derived document download failed."
+          )
 
-          return {
-            message: `Derived document download failed: ${downloadResult.message}`
-          }
+          return buildErrorResponse({
+            code: "DERIVED_DOCUMENT_DOWNLOAD_FAILED",
+            details: downloadResult.message,
+            message: "Derived document download failed."
+          })
       }
     }
   )
@@ -148,6 +225,7 @@ export const registerDocumentsRoute = (
         reply.code(400)
 
         return {
+          code: "INVALID_DOCUMENT_PAYLOAD",
           message: INVALID_DOCUMENT_PAYLOAD_MESSAGE
         }
       }
@@ -175,6 +253,7 @@ export const registerDocumentsRoute = (
         reply.code(400)
 
         return {
+          code: "INVALID_DOCUMENT_UPLOAD_PAYLOAD",
           message: INVALID_DOCUMENT_UPLOAD_PAYLOAD_MESSAGE
         }
       }
@@ -195,14 +274,16 @@ export const registerDocumentsRoute = (
           reply.code(404)
 
           return {
+            code: "DOCUMENT_NOT_FOUND",
             message: DOCUMENT_NOT_FOUND_MESSAGE
           }
         case "invalid-file":
           reply.code(400)
 
-          return {
+          return buildErrorResponse({
+            code: "INVALID_DOCUMENT_UPLOAD_FILE",
             message: uploadResult.message
-          }
+          })
       }
     }
   )
@@ -213,19 +294,30 @@ export const registerDocumentsRoute = (
       request: FastifyRequest<{ Params: { id: string }; Body: unknown }>,
       reply: FastifyReply
     ) => {
-      const actionKind = parseDocumentActionKind(request.body)
+      const actionInput = parseDocumentActionInput(request.body)
 
-      if (actionKind === null) {
+      if (actionInput === null) {
         reply.code(400)
 
+        if (
+          isRecord(request.body) &&
+          request.body.kind === "split-pdf"
+        ) {
+          return {
+            code: "INVALID_DOCUMENT_ACTION_PAYLOAD",
+            message: INVALID_SPLIT_PAGE_RANGES_MESSAGE
+          }
+        }
+
         return {
+          code: "INVALID_DOCUMENT_ACTION_PAYLOAD",
           message: INVALID_DOCUMENT_ACTION_PAYLOAD_MESSAGE
         }
       }
 
       const actionResult = await documentsService.runDocumentAction(
         request.params.id,
-        actionKind
+        actionInput
       )
 
       switch (actionResult.kind) {
@@ -235,14 +327,27 @@ export const registerDocumentsRoute = (
           reply.code(404)
 
           return {
+            code: "DOCUMENT_NOT_FOUND",
             message: DOCUMENT_NOT_FOUND_MESSAGE
           }
         case "error":
           reply.code(actionResult.statusCode)
+          request.log.error(
+            {
+              actionKind: actionInput.kind,
+              code: actionResult.code,
+              details: actionResult.details,
+              documentId: request.params.id,
+              statusCode: actionResult.statusCode
+            },
+            "Document action failed."
+          )
 
-          return {
+          return buildErrorResponse({
+            code: actionResult.code,
+            details: actionResult.details,
             message: actionResult.message
-          }
+          })
       }
     }
   )

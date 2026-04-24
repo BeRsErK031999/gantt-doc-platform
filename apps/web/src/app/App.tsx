@@ -256,16 +256,26 @@ export const App = () => {
   const handleDocumentUpdated = async (
     updatedDocument: DocumentDetails
   ): Promise<void> => {
-    const documents = await loadDocuments()
-
     setDocumentDetailsState({
       kind: "ready",
       document: updatedDocument
     })
-    setDocumentsState({
-      kind: "ready",
-      documents
-    })
+
+    try {
+      const documents = await loadDocuments()
+
+      setDocumentsState({
+        kind: "ready",
+        documents
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error"
+
+      setDocumentsState({
+        kind: "error",
+        message
+      })
+    }
   }
 
   return (
@@ -276,8 +286,8 @@ export const App = () => {
           <h1 className="title">Documents</h1>
           <p className="description">
             This slice keeps local document records, source artifacts, and
-            derived documents, and now delegates PDF compression to an external
-            PDF engine.
+            derived documents, and now delegates PDF compression and split
+            execution to an external PDF engine.
           </p>
         </div>
 

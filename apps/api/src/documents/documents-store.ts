@@ -36,9 +36,11 @@ type LegacyDerivedDocument = {
   id: string
   sourceDocumentId: string
   name: string
-  kind: DocumentDerivationKind
+  kind: StoredDocumentDerivationKind
   status: "planned"
 }
+
+type StoredDocumentDerivationKind = DocumentDerivationKind | "split-pdf-set"
 
 type LegacyDocument = Omit<Document, "origin" | "sourceArtifact" | "derivedDocuments"> & {
   derivedDocuments: LegacyDerivedDocument[]
@@ -117,13 +119,20 @@ const isSourceArtifact = (value: unknown): value is SourceArtifact => {
 
 const isDocumentDerivationKind = (
   value: unknown
-): value is DocumentDerivationKind => {
+): value is StoredDocumentDerivationKind => {
   return (
     value === "converted-pdf" ||
     value === "document-summary" ||
     value === "compressed-pdf" ||
+    value === "split-pdf" ||
     value === "split-pdf-set"
   )
+}
+
+const normalizeDocumentDerivationKind = (
+  value: StoredDocumentDerivationKind
+): DocumentDerivationKind => {
+  return value === "split-pdf-set" ? "split-pdf" : value
 }
 
 const isDocumentOrigin = (value: unknown): value is DocumentOrigin | null => {
@@ -243,7 +252,8 @@ const buildDocumentFromLegacyDerivedPayload = (
   parentDocument: LegacyDocument,
   derivedDocument: LegacyDerivedDocument
 ): Document => {
-  const documentKind = resolveDocumentKindForDerivation(derivedDocument.kind)
+  const derivationKind = normalizeDocumentDerivationKind(derivedDocument.kind)
+  const documentKind = resolveDocumentKindForDerivation(derivationKind)
 
   return {
     id: derivedDocument.id,
@@ -254,7 +264,7 @@ const buildDocumentFromLegacyDerivedPayload = (
     origin: {
       documentId: parentDocument.id,
       relationshipKind: "derived-from",
-      derivationKind: derivedDocument.kind
+      derivationKind
     },
     sourceArtifact: buildSourceArtifact(
       derivedDocument.id,
@@ -291,6 +301,15 @@ const parseDocumentsStoragePayload = (value: unknown): Document[] | null => {
     if (isDocument(document)) {
       documents.push({
         ...document,
+        origin:
+          document.origin === null
+            ? null
+            : {
+                ...document.origin,
+                derivationKind: normalizeDocumentDerivationKind(
+                  document.origin.derivationKind
+                )
+              },
         derivedDocuments: []
       })
       continue

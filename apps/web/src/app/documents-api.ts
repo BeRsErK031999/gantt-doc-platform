@@ -1,4 +1,4 @@
-export type DocumentKind = "pdf" | "docx"
+export type DocumentKind = "pdf" | "docx" | "zip"
 
 export type DocumentStatus = "draft" | "uploaded" | "ready"
 
@@ -21,7 +21,7 @@ export type PlatformDocumentActionKind =
   | "extract-metadata"
   | "generate-derived-document"
 
-export type PdfEngineActionKind = "compress-pdf"
+export type PdfEngineActionKind = "compress-pdf" | "split-pdf"
 
 export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKind
 
@@ -50,7 +50,7 @@ export type DocumentDerivationKind =
   | "converted-pdf"
   | "document-summary"
   | "compressed-pdf"
-  | "split-pdf-set"
+  | "split-pdf"
 
 export type DocumentOrigin = {
   documentId: string
@@ -92,20 +92,31 @@ export type CreateDocumentRequest = {
   kind: DocumentKind
 }
 
-export type RunDocumentActionRequest = {
-  kind: DocumentActionKind
-}
+export type RunDocumentActionRequest =
+  | {
+      kind: Exclude<DocumentActionKind, "split-pdf">
+    }
+  | {
+      kind: "split-pdf"
+      pageRanges: string
+    }
 
 type ErrorResponse = {
+  code?: string
+  details?: string
   message: string
 }
 
 export class ApiError extends Error {
+  readonly code?: string
+  readonly details?: string
   readonly status: number
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string, details?: string) {
     super(message)
     this.name = "ApiError"
+    this.code = code
+    this.details = details
     this.status = status
   }
 }
@@ -115,7 +126,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => {
 }
 
 const isDocumentKind = (value: unknown): value is DocumentKind => {
-  return value === "pdf" || value === "docx"
+  return value === "pdf" || value === "docx" || value === "zip"
 }
 
 const isDocumentStatus = (value: unknown): value is DocumentStatus => {
@@ -141,7 +152,8 @@ const isDocumentOperationKind = (
     value === "convert-to-pdf" ||
     value === "extract-metadata" ||
     value === "generate-derived-document" ||
-    value === "compress-pdf"
+    value === "compress-pdf" ||
+    value === "split-pdf"
   )
 }
 
@@ -158,7 +170,7 @@ const isDocumentDerivationKind = (
     value === "converted-pdf" ||
     value === "document-summary" ||
     value === "compressed-pdf" ||
-    value === "split-pdf-set"
+    value === "split-pdf"
   )
 }
 
@@ -301,17 +313,25 @@ const isErrorResponse = (value: unknown): value is ErrorResponse => {
     return false
   }
 
-  return typeof value.message === "string"
+  return (
+    typeof value.message === "string" &&
+    (typeof value.code === "string" || value.code === undefined) &&
+    (typeof value.details === "string" || value.details === undefined)
+  )
 }
 
-const getResponseMessage = async (response: Response): Promise<string> => {
+const getErrorResponse = async (
+  response: Response
+): Promise<ErrorResponse> => {
   const payload: unknown = await response.json().catch(() => null)
 
   if (isErrorResponse(payload)) {
-    return payload.message
+    return payload
   }
 
-  return `Request failed with status ${response.status}`
+  return {
+    message: `Request failed with status ${response.status}`
+  }
 }
 
 const ensureSuccessfulResponse = async (response: Response): Promise<void> => {
@@ -319,7 +339,14 @@ const ensureSuccessfulResponse = async (response: Response): Promise<void> => {
     return
   }
 
-  throw new ApiError(await getResponseMessage(response), response.status)
+  const errorResponse = await getErrorResponse(response)
+
+  throw new ApiError(
+    errorResponse.message,
+    response.status,
+    errorResponse.code,
+    errorResponse.details
+  )
 }
 
 export const loadDocuments = async (

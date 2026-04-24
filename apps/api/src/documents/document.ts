@@ -1,4 +1,4 @@
-export type DocumentKind = "pdf" | "docx"
+export type DocumentKind = "pdf" | "docx" | "zip"
 
 export type DocumentStatus = "draft" | "uploaded" | "ready"
 
@@ -21,7 +21,7 @@ export type PlatformDocumentActionKind =
   | "extract-metadata"
   | "generate-derived-document"
 
-export type PdfEngineActionKind = "compress-pdf"
+export type PdfEngineActionKind = "compress-pdf" | "split-pdf"
 
 export type DocumentActionKind = PlatformDocumentActionKind | PdfEngineActionKind
 
@@ -50,7 +50,7 @@ export type DocumentDerivationKind =
   | "converted-pdf"
   | "document-summary"
   | "compressed-pdf"
-  | "split-pdf-set"
+  | "split-pdf"
 
 export type DocumentOrigin = {
   documentId: string
@@ -109,7 +109,7 @@ export type UploadedDocumentSource = {
 }
 
 export const isDocumentKind = (value: unknown): value is DocumentKind => {
-  return value === "pdf" || value === "docx"
+  return value === "pdf" || value === "docx" || value === "zip"
 }
 
 export const isPlatformDocumentActionKind = (
@@ -121,7 +121,7 @@ export const isPlatformDocumentActionKind = (
 export const isPdfEngineActionKind = (
   value: unknown
 ): value is PdfEngineActionKind => {
-  return value === "compress-pdf"
+  return value === "compress-pdf" || value === "split-pdf"
 }
 
 export const isDocumentActionKind = (
@@ -136,6 +136,7 @@ export const isPdfEngineActionSupportedForDocument = (
 ): boolean => {
   switch (actionKind) {
     case "compress-pdf":
+    case "split-pdf":
       return documentKind === "pdf"
   }
 }
@@ -153,6 +154,10 @@ export const buildPlannedOperations = (
     baseOperations.unshift("convert-to-pdf")
   }
 
+  if (documentKind === "pdf") {
+    baseOperations.push("compress-pdf", "split-pdf")
+  }
+
   return baseOperations.map((kind, index) => ({
     id: `${documentId}-operation-${index + 1}`,
     documentId,
@@ -163,12 +168,14 @@ export const buildPlannedOperations = (
 
 const DOCUMENT_EXTENSIONS: Record<DocumentKind, string> = {
   pdf: "pdf",
-  docx: "docx"
+  docx: "docx",
+  zip: "zip"
 }
 
 const DOCUMENT_MIME_TYPES: Record<DocumentKind, string> = {
   pdf: "application/pdf",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  zip: "application/zip"
 }
 
 export const resolveDocumentKindFromSourceFile = ({
@@ -285,7 +292,7 @@ export const resolveDocumentKindForDerivation = (
   switch (derivationKind) {
     case "converted-pdf":
     case "compressed-pdf":
-    case "split-pdf-set":
+    case "split-pdf":
       return "pdf"
     case "document-summary":
       return "docx"

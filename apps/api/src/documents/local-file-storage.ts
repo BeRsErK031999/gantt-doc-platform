@@ -47,7 +47,8 @@ const STORAGE_ROOT_PATH = resolve(PROJECT_ROOT_PATH, "storage")
 
 const DOCUMENT_EXTENSIONS: Record<DocumentKind, string> = {
   pdf: "pdf",
-  docx: "docx"
+  docx: "docx",
+  zip: "zip"
 }
 
 const buildDocumentSourceFilePath = (

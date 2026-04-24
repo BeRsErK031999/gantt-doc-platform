@@ -6,6 +6,7 @@ export type SubmitPdfActionInput = {
   actionKind: PdfEngineActionKind
   documentId: string
   documentName: string
+  pageRanges?: string
   sourceFileName: string
   sourceFilePath: string
 }
@@ -25,9 +26,11 @@ export type PdfEngineActionSubmissionResult =
       resultFileContents: Uint8Array
     }
   | {
+      code: string
+      details?: string
       kind: "error"
       message: string
-      statusCode: 400 | 500 | 502
+      statusCode: 400 | 500 | 502 | 503
     }
 
 type PdfEngineGatewayErrorResult = Extract<
@@ -56,9 +59,26 @@ type PdfEngineOperationJob = {
   status: string
 }
 
+type PdfEngineRequestStep =
+  | "document-create"
+  | "source-upload"
+  | "job-create"
+  | "execute"
+  | "result-download"
+
 const PDF_ENGINE_PRODUCT_BASE_PATH = "/api/v1"
 const REQUEST_TIMEOUT_MS = 30_000
-const DEFAULT_RESULT_FILE_NAME = "compressed.pdf"
+const PDF_FILE_SIGNATURE = new Uint8Array([
+  0x25, 0x50, 0x44, 0x46, 0x2d
+])
+const ZIP_FILE_SIGNATURE = new Uint8Array([
+  0x50, 0x4b, 0x03, 0x04
+])
+
+const DEFAULT_RESULT_FILE_NAME_BY_ACTION: Record<PdfEngineActionKind, string> = {
+  "compress-pdf": "compressed.pdf",
+  "split-pdf": "split.zip"
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === "object" && value !== null
@@ -117,22 +137,31 @@ const resolveErrorMessageFromResponse = async (
 }
 
 const createConfigurationError = (
-  message: string
+  code: string,
+  message: string,
+  details?: string
 ): PdfEngineActionSubmissionResult => {
   return {
     kind: "error",
+    code,
+    details,
     message,
     statusCode: 500
   }
 }
 
 const createGatewayError = (
-  message: string
+  code: string,
+  message: string,
+  statusCode: 400 | 500 | 502 | 503 = 502,
+  details?: string
 ): PdfEngineGatewayErrorResult => {
   return {
     kind: "error",
+    code,
+    details,
     message,
-    statusCode: 502
+    statusCode
   }
 }
 
@@ -142,22 +171,37 @@ const isGatewayErrorResult = (
   return isRecord(value) && "kind" in value && value.kind === "error"
 }
 
+const getDefaultResultFileName = (
+  actionKind: PdfEngineActionKind,
+  mediaType: string
+): string => {
+  if (actionKind === "split-pdf" && mediaType === "application/pdf") {
+    return "split.pdf"
+  }
+
+  return DEFAULT_RESULT_FILE_NAME_BY_ACTION[actionKind]
+}
+
 const parseFileNameFromContentDisposition = (
+  actionKind: PdfEngineActionKind,
+  mediaType: string,
   contentDisposition: string | null
 ): string => {
   if (contentDisposition === null) {
-    return DEFAULT_RESULT_FILE_NAME
+    return getDefaultResultFileName(actionKind, mediaType)
   }
 
   const match = /filename="?([^";]+)"?/i.exec(contentDisposition)
 
   if (match === null) {
-    return DEFAULT_RESULT_FILE_NAME
+    return getDefaultResultFileName(actionKind, mediaType)
   }
 
   const fileName = match[1].trim()
 
-  return fileName.length > 0 ? fileName : DEFAULT_RESULT_FILE_NAME
+  return fileName.length > 0
+    ? fileName
+    : getDefaultResultFileName(actionKind, mediaType)
 }
 
 const createAuthorizedHeaders = (authToken: string): Headers => {
@@ -170,6 +214,53 @@ const createAuthorizedHeaders = (authToken: string): Headers => {
 
 const createTimeoutSignal = (): AbortSignal => {
   return AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+}
+
+const buildPdfEngineResponseError = async (
+  actionKind: PdfEngineActionKind,
+  step: PdfEngineRequestStep,
+  response: Response
+): Promise<PdfEngineGatewayErrorResult> => {
+  const stepLabelByCode: Record<PdfEngineRequestStep, string> = {
+    "document-create": "document creation",
+    "source-upload": "source file upload",
+    "job-create": "job creation",
+    execute: "job execution",
+    "result-download": "result download"
+  }
+  const stepCodeByName: Record<PdfEngineRequestStep, string> = {
+    "document-create": "PDF_ENGINE_DOCUMENT_CREATE_FAILED",
+    "source-upload": "PDF_ENGINE_SOURCE_UPLOAD_FAILED",
+    "job-create": "PDF_ENGINE_JOB_CREATE_FAILED",
+    execute: "PDF_ENGINE_EXECUTION_FAILED",
+    "result-download": "PDF_ENGINE_RESULT_DOWNLOAD_FAILED"
+  }
+  const details = await resolveErrorMessageFromResponse(response)
+
+  if (response.status === 401 || response.status === 403) {
+    return createGatewayError(
+      "PDF_ENGINE_AUTH_INVALID",
+      "PDF engine rejected the configured bearer token.",
+      502,
+      details
+    )
+  }
+
+  if (actionKind === "split-pdf") {
+    return createGatewayError(
+      "PDF_ENGINE_SPLIT_FAILED",
+      "PDF engine split execution failed.",
+      502,
+      `HTTP ${response.status}. ${details}`
+    )
+  }
+
+  return createGatewayError(
+    stepCodeByName[step],
+    `PDF engine ${stepLabelByCode[step]} failed.`,
+    502,
+    `HTTP ${response.status}. ${details}`
+  )
 }
 
 const createPdfEngineDocument = async (
@@ -191,15 +282,14 @@ const createPdfEngineDocument = async (
   })
 
   if (!response.ok) {
-    return createGatewayError(
-      `PDF engine document creation failed: ${await resolveErrorMessageFromResponse(response)}`
-    )
+    return buildPdfEngineResponseError("compress-pdf", "document-create", response)
   }
 
   const payload: unknown = await response.json().catch(() => null)
 
   if (!isPdfEngineDocumentSummary(payload)) {
     return createGatewayError(
+      "PDF_ENGINE_DOCUMENT_CREATE_INVALID_RESPONSE",
       "PDF engine document creation returned an unexpected response shape."
     )
   }
@@ -237,19 +327,27 @@ const uploadSourceFileToPdfEngine = async (
   )
 
   if (!response.ok) {
-    return createGatewayError(
-      `PDF engine input upload failed: ${await resolveErrorMessageFromResponse(response)}`
-    )
+    return buildPdfEngineResponseError("compress-pdf", "source-upload", response)
   }
 
   return true
 }
 
-const createCompressOperation = async (
+const createPdfEngineOperation = async (
   authToken: string,
   baseUrl: string,
+  input: SubmitPdfActionInput,
   engineDocumentId: string
 ): Promise<PdfEngineOperationJob | PdfEngineGatewayErrorResult> => {
+  const requestBody =
+    input.actionKind === "split-pdf"
+      ? {
+          operationType: "split",
+          pageRanges: input.pageRanges
+        }
+      : {
+          operationType: "compress"
+        }
   const response = await fetch(
     resolveRequestUrl(
       baseUrl,
@@ -261,33 +359,35 @@ const createCompressOperation = async (
         ...Object.fromEntries(createAuthorizedHeaders(authToken).entries()),
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        operationType: "compress"
-      }),
+      body: JSON.stringify(requestBody),
       signal: createTimeoutSignal()
     }
   )
 
   if (!response.ok) {
-    return createGatewayError(
-      `PDF engine job creation failed: ${await resolveErrorMessageFromResponse(response)}`
-    )
+    return buildPdfEngineResponseError(input.actionKind, "job-create", response)
   }
 
   const payload: unknown = await response.json().catch(() => null)
 
   if (!isPdfEngineOperationJob(payload)) {
     return createGatewayError(
-      "PDF engine job creation returned an unexpected response shape."
+      input.actionKind === "split-pdf"
+        ? "PDF_ENGINE_SPLIT_FAILED"
+        : "PDF_ENGINE_JOB_CREATE_INVALID_RESPONSE",
+      input.actionKind === "split-pdf"
+        ? "PDF engine split job creation returned an unexpected response shape."
+        : "PDF engine job creation returned an unexpected response shape."
     )
   }
 
   return payload
 }
 
-const executeCompressOperation = async (
+const executePdfEngineOperation = async (
   authToken: string,
   baseUrl: string,
+  actionKind: PdfEngineActionKind,
   engineDocumentId: string,
   engineRequestId: string
 ): Promise<PdfEngineOperationJob | PdfEngineGatewayErrorResult> => {
@@ -304,32 +404,82 @@ const executeCompressOperation = async (
   )
 
   if (!response.ok) {
-    return createGatewayError(
-      `PDF engine execution failed: ${await resolveErrorMessageFromResponse(response)}`
-    )
+    return buildPdfEngineResponseError(actionKind, "execute", response)
   }
 
   const payload: unknown = await response.json().catch(() => null)
 
   if (!isPdfEngineOperationJob(payload)) {
     return createGatewayError(
-      "PDF engine execution returned an unexpected response shape."
+      actionKind === "split-pdf"
+        ? "PDF_ENGINE_SPLIT_FAILED"
+        : "PDF_ENGINE_EXECUTION_INVALID_RESPONSE",
+      actionKind === "split-pdf"
+        ? "PDF engine split execution returned an unexpected response shape."
+        : "PDF engine execution returned an unexpected response shape."
     )
   }
 
   if (payload.status !== "completed") {
     return createGatewayError(
+      actionKind === "split-pdf"
+        ? "PDF_ENGINE_SPLIT_FAILED"
+        : "PDF_ENGINE_EXECUTION_UNEXPECTED_STATUS",
+      actionKind === "split-pdf"
+        ? "PDF engine split execution did not complete successfully."
+        : "PDF engine execution did not complete successfully.",
+      502,
       payload.message ??
-        `PDF engine execution finished with unexpected status "${payload.status}".`
+        `Unexpected engine job status: ${payload.status}.`
     )
   }
 
   return payload
 }
 
-const downloadCompressResult = async (
+const startsWithSignature = (
+  value: Uint8Array,
+  signature: Uint8Array
+): boolean => {
+  if (value.byteLength < signature.byteLength) {
+    return false
+  }
+
+  for (let index = 0; index < signature.byteLength; index += 1) {
+    if (value[index] !== signature[index]) {
+      return false
+    }
+  }
+
+  return true
+}
+
+const isValidSplitResult = (
+  mediaType: string,
+  resultFileContents: Uint8Array
+): boolean => {
+  if (mediaType === "application/pdf") {
+    return startsWithSignature(resultFileContents, PDF_FILE_SIGNATURE)
+  }
+
+  if (mediaType === "application/zip") {
+    return startsWithSignature(resultFileContents, ZIP_FILE_SIGNATURE)
+  }
+
+  if (mediaType === "application/octet-stream") {
+    return (
+      startsWithSignature(resultFileContents, PDF_FILE_SIGNATURE) ||
+      startsWithSignature(resultFileContents, ZIP_FILE_SIGNATURE)
+    )
+  }
+
+  return false
+}
+
+const downloadPdfEngineResult = async (
   authToken: string,
   baseUrl: string,
+  actionKind: PdfEngineActionKind,
   engineDocumentId: string,
   engineRequestId: string
 ): Promise<PdfEngineActionSubmissionResult> => {
@@ -346,42 +496,76 @@ const downloadCompressResult = async (
   )
 
   if (!response.ok) {
-    return createGatewayError(
-      `PDF engine result download failed: ${await resolveErrorMessageFromResponse(response)}`
-    )
+    return buildPdfEngineResponseError(actionKind, "result-download", response)
   }
 
   const resultFileContents = new Uint8Array(await response.arrayBuffer())
+  const mediaType =
+    response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ??
+    (actionKind === "split-pdf" ? "application/zip" : "application/pdf")
 
   if (resultFileContents.byteLength === 0) {
-    return createGatewayError("PDF engine returned an empty result artifact.")
+    return createGatewayError(
+      actionKind === "split-pdf"
+        ? "PDF_ENGINE_SPLIT_RESULT_INVALID"
+        : "PDF_ENGINE_RESULT_EMPTY",
+      actionKind === "split-pdf"
+        ? "PDF engine returned an empty split result artifact."
+        : "PDF engine returned an empty compressed PDF artifact."
+    )
+  }
+
+  if (
+    actionKind === "split-pdf" &&
+    !isValidSplitResult(mediaType, resultFileContents)
+  ) {
+    return createGatewayError(
+      "PDF_ENGINE_SPLIT_RESULT_INVALID",
+      "PDF engine returned an unsupported split result artifact.",
+      502,
+      `Unexpected split result media type: ${mediaType}.`
+    )
   }
 
   return {
     kind: "completed",
     engineDocumentId,
     engineRequestId,
-    mediaType: response.headers.get("content-type") ?? "application/pdf",
+    mediaType,
     resultFileName: parseFileNameFromContentDisposition(
+      actionKind,
+      mediaType,
       response.headers.get("content-disposition")
     ),
     resultFileContents
   }
 }
 
-const submitCompressPdfAction = async (
+const submitPdfActionToEngine = async (
   config: PdfEngineGatewayConfig,
   input: SubmitPdfActionInput
 ): Promise<PdfEngineActionSubmissionResult> => {
   if (config.baseUrl === undefined) {
     return createConfigurationError(
-      "PDF_ENGINE_BASE_URL is not configured for gantt-doc-platform."
+      "PDF_ENGINE_BASE_URL_MISSING",
+      "PDF compression is not configured on the server.",
+      "Missing environment variable: PDF_ENGINE_BASE_URL."
     )
   }
 
   if (config.authToken === undefined) {
     return createConfigurationError(
-      "PDF_ENGINE_AUTH_TOKEN is not configured for gantt-doc-platform."
+      "PDF_ENGINE_AUTH_TOKEN_MISSING",
+      "PDF compression authentication is not configured on the server.",
+      "Missing environment variable: PDF_ENGINE_AUTH_TOKEN."
+    )
+  }
+
+  if (input.actionKind === "split-pdf" && input.pageRanges === undefined) {
+    return createGatewayError(
+      "PDF_ENGINE_SPLIT_FAILED",
+      "Split PDF requires pageRanges before calling the PDF engine.",
+      400
     )
   }
 
@@ -393,6 +577,15 @@ const submitCompressPdfAction = async (
     )
 
     if (isGatewayErrorResult(engineDocument)) {
+      if (input.actionKind === "split-pdf" && engineDocument.code !== "PDF_ENGINE_AUTH_INVALID") {
+        return createGatewayError(
+          "PDF_ENGINE_SPLIT_FAILED",
+          "PDF engine split setup failed.",
+          engineDocument.statusCode,
+          engineDocument.details
+        )
+      }
+
       return engineDocument
     }
 
@@ -405,12 +598,22 @@ const submitCompressPdfAction = async (
     )
 
     if (uploadResult !== true) {
+      if (input.actionKind === "split-pdf" && uploadResult.code !== "PDF_ENGINE_AUTH_INVALID") {
+        return createGatewayError(
+          "PDF_ENGINE_SPLIT_FAILED",
+          "PDF engine split setup failed.",
+          uploadResult.statusCode,
+          uploadResult.details
+        )
+      }
+
       return uploadResult
     }
 
-    const operationJob = await createCompressOperation(
+    const operationJob = await createPdfEngineOperation(
       config.authToken,
       config.baseUrl,
+      input,
       engineDocument.id
     )
 
@@ -418,9 +621,10 @@ const submitCompressPdfAction = async (
       return operationJob
     }
 
-    const executionResult = await executeCompressOperation(
+    const executionResult = await executePdfEngineOperation(
       config.authToken,
       config.baseUrl,
+      input.actionKind,
       engineDocument.id,
       operationJob.id
     )
@@ -429,9 +633,10 @@ const submitCompressPdfAction = async (
       return executionResult
     }
 
-    return downloadCompressResult(
+    return downloadPdfEngineResult(
       config.authToken,
       config.baseUrl,
+      input.actionKind,
       engineDocument.id,
       operationJob.id
     )
@@ -440,7 +645,10 @@ const submitCompressPdfAction = async (
       error instanceof Error ? error.message : "Unknown PDF engine error."
 
     return createGatewayError(
-      `PDF engine is unavailable or unreachable: ${message}`
+      "PDF_ENGINE_UNAVAILABLE",
+      "PDF engine is unavailable or unreachable.",
+      503,
+      message
     )
   }
 }
@@ -449,6 +657,6 @@ export const createHttpPdfEngineGateway = (
   config: PdfEngineGatewayConfig
 ): PdfEngineGateway => {
   return {
-    submitPdfAction: async (input) => submitCompressPdfAction(config, input)
+    submitPdfAction: async (input) => submitPdfActionToEngine(config, input)
   }
 }
