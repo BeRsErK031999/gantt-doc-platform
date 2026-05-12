@@ -1,0 +1,69 @@
+image: node:20
+
+stages:
+  - install
+  - lint
+  - typecheck
+  - test
+  - build
+
+default:
+  interruptible: true
+  cache:
+    key:
+      files:
+        - yarn.lock
+    paths:
+      - .yarn/cache/
+      - .yarn/install-state.gz
+      - node_modules/
+  before_script:
+    - corepack enable
+    - yarn install --immutable
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+.run_optional_script:
+  script:
+    - |
+      if node -e "const scripts=require('./package.json').scripts||{}; process.exit(scripts[process.env.NPM_SCRIPT] ? 0 : 1)"; then
+        yarn "$NPM_SCRIPT"
+      else
+        echo "Skipping missing script: $NPM_SCRIPT"
+      fi
+
+install:
+  stage: install
+  script:
+    - yarn install --immutable
+
+lint:
+  stage: lint
+  variables:
+    NPM_SCRIPT: lint
+  extends: .run_optional_script
+
+typecheck:
+  stage: typecheck
+  variables:
+    NPM_SCRIPT: type-check
+  extends: .run_optional_script
+
+test:
+  stage: test
+  variables:
+    NPM_SCRIPT: test
+  extends: .run_optional_script
+
+build:
+  stage: build
+  script:
+    - yarn build
+  artifacts:
+    when: on_success
+    expire_in: 1 week
+    paths:
+      - apps/*/dist/

@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "lint": "eslint .",
-    "type-check": "yarn workspace @gantt-doc/api type-check && yarn workspace @gantt-doc/web type-check"
+    "type-check": "yarn workspace @gantt-doc/api type-check && yarn workspace @gantt-doc/web type-check",
+    "build": "yarn workspace @gantt-doc/api build && yarn workspace @gantt-doc/web build"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
