@@ -52,14 +52,17 @@ build_static_image:
     - mkdir -p /kaniko/.docker
     - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
     - |
-      DESTINATIONS="--destination $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA --destination $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+      DESTINATIONS="--destination $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
       if [ "$CI_COMMIT_BRANCH" = "develop" ]; then
         DESTINATIONS="$DESTINATIONS --destination $CI_REGISTRY_IMAGE:dev"
+      elif [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        DESTINATIONS="$DESTINATIONS --destination $CI_REGISTRY_IMAGE:prod"
       fi
       /kaniko/executor --context "$CI_PROJECT_DIR" --dockerfile "$CI_PROJECT_DIR/Dockerfile.static" $DESTINATIONS
     - 'echo "Static files path inside image: /static"'
   rules:
-    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
 lint:
   stage: lint
