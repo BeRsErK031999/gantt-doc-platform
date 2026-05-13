@@ -2,6 +2,7 @@ image: node:20
 
 stages:
   - install
+  - image
   - lint
   - typecheck
   - test
@@ -39,6 +40,21 @@ install:
   stage: install
   script:
     - yarn install --immutable
+
+build_static_image:
+  stage: image
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  before_script: []
+  cache: []
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor --context "$CI_PROJECT_DIR" --dockerfile "$CI_PROJECT_DIR/Dockerfile.static" --destination "$CI_REGISTRY_IMAGE/static:$CI_COMMIT_SHORT_SHA" --destination "$CI_REGISTRY_IMAGE/static:$CI_COMMIT_REF_SLUG"
+    - echo "Static files path inside image: /static"
+  rules:
+    - if: $CI_COMMIT_BRANCH
 
 lint:
   stage: lint

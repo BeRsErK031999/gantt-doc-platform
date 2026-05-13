@@ -1,0 +1,11 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY . .
+RUN corepack enable && yarn install --immutable
+RUN yarn build
+
+FROM alpine:3.20
+WORKDIR /static
+COPY --from=builder /app/apps/web/dist/ /static/
+CMD ["sh", "-c", "echo Static files are available in /static && ls -la /static"]
