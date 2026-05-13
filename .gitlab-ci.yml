@@ -24,8 +24,8 @@ default:
 
 workflow:
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
 
 .run_optional_script:
   script:
@@ -57,9 +57,9 @@ build_static_image:
         DESTINATIONS="$DESTINATIONS --destination $CI_REGISTRY_IMAGE:dev"
       fi
       /kaniko/executor --context "$CI_PROJECT_DIR" --dockerfile "$CI_PROJECT_DIR/Dockerfile.static" $DESTINATIONS
-    - echo "Static files path inside image: /static"
+    - 'echo "Static files path inside image: /static"'
   rules:
-    - if: $CI_COMMIT_BRANCH
+    - if: '$CI_COMMIT_BRANCH'
 
 lint:
   stage: lint
